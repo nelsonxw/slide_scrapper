@@ -244,6 +244,16 @@ class SiteScraper:
         log(f"Crawling complete. Discovered {len(discovered_items)} valid PowerPoint presentations across {len(visited_pages)} pages.")
         return discovered_items
 
+    def _fetch_url(self, url: str, client: httpx.Client | None = None) -> httpx.Response | None:
+        """Helper to fetch a URL safely using existing client or temporary client."""
+        try:
+            if client:
+                return client.get(url, headers=self.headers, timeout=30.0, follow_redirects=True)
+            with httpx.Client(headers=self.headers, timeout=30.0, follow_redirects=True, verify=False) as temp_client:
+                return temp_client.get(url)
+        except Exception:
+            return None
+
     def _fetch_and_validate(
         self,
         url: str,
@@ -256,15 +266,8 @@ class SiteScraper:
         Downloads a candidate URL and validates if the response is a PowerPoint presentation.
         """
         try:
-            fetch_func = client.get if client else httpx.get
-            resp = fetch_func(
-                url,
-                headers=self.headers,
-                timeout=30.0,
-                follow_redirects=True,
-                verify=False,
-            )
-            if resp.status_code != 200:
+            resp = self._fetch_url(url, client=client)
+            if not resp or resp.status_code != 200:
                 return None
 
             is_ppt, fmt = is_powerpoint_content(resp.content)
@@ -286,14 +289,8 @@ class SiteScraper:
                     if inner_a and inner_a.get("href"):
                         inner_url = urljoin(url, inner_a["href"])
                         log(f"Following inner download link: {inner_url}")
-                        inner_resp = fetch_func(
-                            inner_url,
-                            headers=self.headers,
-                            timeout=30.0,
-                            follow_redirects=True,
-                            verify=False,
-                        )
-                        if inner_resp.status_code == 200:
+                        inner_resp = self._fetch_url(inner_url, client=client)
+                        if inner_resp and inner_resp.status_code == 200:
                             inner_is_ppt, inner_fmt = is_powerpoint_content(inner_resp.content)
                             if inner_is_ppt:
                                 log(f"Verified PowerPoint file from landing page: {title} ({inner_fmt.upper()})")
