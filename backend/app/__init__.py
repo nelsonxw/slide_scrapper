@@ -1,0 +1,1 @@
+"""Slide Scrapper Application Package"""
