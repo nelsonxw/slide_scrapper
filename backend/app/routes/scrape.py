@@ -24,7 +24,10 @@ router = APIRouter(prefix="/api/scrape", tags=["Scraper"])
 class StartScrapeRequest(BaseModel):
     url: str = Field(..., description="Target website URL to scrape")
     max_pages: int = Field(default=25, ge=1, le=100, description="Max sub-pages to crawl")
-    max_depth: int = Field(default=3, ge=1, le=5, description="Max crawl depth")
+    max_depth: int = Field(default=2, ge=0, le=5, description="Max crawl depth (0 = target page only)")
+    cookies: str | None = Field(default=None, description="Optional raw session cookies string")
+    google_token: str | None = Field(default=None, description="Optional Google OAuth/ID token")
+    user_email: str | None = Field(default=None, description="Optional signed-in user email")
 
 
 class ScrapeTaskStatus(BaseModel):
@@ -47,7 +50,16 @@ tasks: dict[str, dict[str, Any]] = {}
 active_threads: dict[str, threading.Event] = {}
 
 
-def _run_scrape_pipeline(task_id: str, target_url: str, max_pages: int, max_depth: int, stop_event: threading.Event):
+def _run_scrape_pipeline(
+    task_id: str,
+    target_url: str,
+    max_pages: int,
+    max_depth: int,
+    stop_event: threading.Event,
+    cookies: str | None = None,
+    google_token: str | None = None,
+    user_email: str | None = None,
+):
     task = tasks[task_id]
     task["status"] = "running"
     task["current_step"] = "Initializing crawler..."
@@ -64,12 +76,19 @@ def _run_scrape_pipeline(task_id: str, target_url: str, max_pages: int, max_dept
 
     try:
         log(f"Starting discovery on {target_url} (depth <= {max_depth}, max_pages <= {max_pages})")
+        if user_email:
+            log(f"Authenticated as Google User: {user_email}")
+        if cookies:
+            log("Session cookies configured for authenticated requests.")
         task["current_step"] = "Crawling site & searching for download buttons..."
 
         scraper = SiteScraper(
             target_url=target_url,
             max_crawl_pages=max_pages,
             max_depth=max_depth,
+            cookies=cookies,
+            google_token=google_token,
+            user_email=user_email,
         )
 
         discovered_ppts: list[DiscoveredPowerPoint] = []
@@ -203,7 +222,16 @@ def start_scrape_task(request: StartScrapeRequest):
     # Start thread
     thread = threading.Thread(
         target=_run_scrape_pipeline,
-        args=(task_id, request.url.strip(), request.max_pages, request.max_depth, stop_event),
+        args=(
+            task_id,
+            request.url.strip(),
+            request.max_pages,
+            request.max_depth,
+            stop_event,
+            request.cookies,
+            request.google_token,
+            request.user_email,
+        ),
         daemon=True,
     )
     thread.start()
@@ -230,3 +258,35 @@ def cancel_scrape_task(task_id: str):
         tasks[task_id]["status"] = "cancelled"
         return {"message": "Task marked cancelled"}
     raise HTTPException(status_code=404, detail="Task not found")
+
+
+class OpenBrowserLoginRequest(BaseModel):
+    url: str = Field(default="https://slidemodel.com/account/login/", description="Website URL to log in to")
+
+
+@router.post("/open-browser-login")
+def open_browser_login(req: OpenBrowserLoginRequest):
+    """
+    Opens a browser for manual login and automatically extracts cookies after login.
+    Returns the extracted cookies for use in automated scraping.
+    """
+    import queue
+
+    result_queue = queue.Queue()
+
+    def _run_browser():
+        from app.scraper.browser_driver import BrowserDownloader
+        downloader = BrowserDownloader(headless=False)
+        cookies = downloader.extract_cookies_after_login()
+        result_queue.put(cookies)
+
+    # Run in thread
+    thread = threading.Thread(target=_run_browser, daemon=True)
+    thread.start()
+
+    # Wait for result with timeout
+    try:
+        cookies = result_queue.get(timeout=300)  # 5 minutes timeout
+        return {"status": "success", "cookies": cookies, "message": "Cookies extracted successfully. They have been automatically filled in the Session Cookies field."}
+    except queue.Empty:
+        return {"status": "timeout", "message": "Login timeout. Please try again."}

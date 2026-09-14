@@ -25,6 +25,7 @@ A standalone full-stack web application that crawls websites and their sub-pages
 4. **Modern Responsive React Frontend (`frontend/`)**:
    - **Tab 1: Scrape & Discover**: Enter target site URL, adjust max sub-pages and crawl depth, with live progress logs and metric counters.
    - **Tab 2: Slide Gallery & Preview**: Card grid of all uploaded slides, slide number badges, full-screen lightbox preview modal, search filtering, multi-select checkboxes, Select All, and **"Delete Selected"** action from Firebase Storage.
+   - **Browser-Based Login**: Click "🌐 Open Browser for Google Login" to open a visible browser window for manual authentication on gated sites (e.g., SlideModel). The session is preserved for all future automated scrapes.
 
 ---
 
@@ -69,6 +70,26 @@ PORT=8000
 ```
 
 > **Note**: If `serviceAccountKey.json` is not yet placed in the project folder, the app automatically activates fallback local storage sync so all scraping, splitting, previewing, and batch-deleting features function locally and upload to Firebase as soon as credentials are provided.
+
+---
+
+## 🔐 Browser-Based Login for Gated Sites
+
+For websites that require user authentication (e.g., SlideModel free templates):
+
+**Why Google One-Tap doesn't work in automated browsers:**
+Google has anti-automation protections that detect when a browser is controlled by automation tools (like Playwright) and blocks Google One-Tap to prevent fraud. This is why the automated browser cannot show Google One-Tap.
+
+**Solution: Automatic Cookie Extraction**
+
+1. In the **Scrape & Discover** tab, click **"🌐 Auto-Extract Cookies After Login"** in the Advanced section.
+2. A browser window will open with two tabs:
+   - **Tab 1**: Google login page - sign in with your Google account
+   - **Tab 2**: SlideModel login page - complete Google One-Tap authentication
+3. **Close the browser window** when finished - cookies are automatically extracted and filled in the Session Cookies field
+4. All future scrapes will use these cookies to download gated content without additional login prompts
+
+This approach is completely automatic - no manual cookie copying required!
 
 ---
 

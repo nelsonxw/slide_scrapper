@@ -53,14 +53,24 @@ export interface DeleteSlidesResponse {
 const API_BASE = '/api';
 
 export const api = {
-  async startScrape(params: { url: string; max_pages?: number; max_depth?: number }): Promise<ScrapeTaskStatus> {
+  async startScrape(params: {
+    url: string;
+    max_pages?: number;
+    max_depth?: number;
+    cookies?: string;
+    google_token?: string;
+    user_email?: string;
+  }): Promise<ScrapeTaskStatus> {
     const res = await fetch(`${API_BASE}/scrape/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         url: params.url,
         max_pages: params.max_pages ?? 25,
-        max_depth: params.max_depth ?? 3,
+        max_depth: params.max_depth ?? 2,
+        cookies: params.cookies || undefined,
+        google_token: params.google_token || undefined,
+        user_email: params.user_email || undefined,
       }),
     });
     if (!res.ok) {
@@ -80,6 +90,18 @@ export const api = {
 
   async cancelScrape(taskId: string): Promise<void> {
     await fetch(`${API_BASE}/scrape/cancel/${taskId}`, { method: 'POST' });
+  },
+
+  async openBrowserLogin(url?: string): Promise<{ status: string; message: string; cookies?: string }> {
+    const res = await fetch(`${API_BASE}/scrape/open-browser-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url || 'https://slidemodel.com/account/login/' }),
+    });
+    if (!res.ok) {
+      throw new Error('Failed to open browser session');
+    }
+    return res.json();
   },
 
   async getSlides(search?: string): Promise<StoredSlideCard[]> {

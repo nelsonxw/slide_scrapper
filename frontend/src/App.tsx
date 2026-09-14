@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ScrapeForm } from './components/ScrapeForm';
 import { SlideGallery } from './components/SlideGallery';
+import { GoogleAuth, GoogleUserProfile } from './components/GoogleAuth';
 import { api, StorageStatus } from './api/client';
 import { IconGlobe, IconLayers, IconCloud } from './components/Icons';
 
@@ -8,6 +9,7 @@ export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'scrape' | 'gallery'>('scrape');
   const [storageStatus, setStorageStatus] = useState<StorageStatus | null>(null);
   const [slideCount, setSlideCount] = useState<number>(0);
+  const [googleUser, setGoogleUser] = useState<GoogleUserProfile | null>(null);
 
   const fetchStatusAndCount = async () => {
     try {
@@ -132,8 +134,8 @@ export const App: React.FC = () => {
           </button>
         </nav>
 
-        {/* Firebase Storage Badge */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        {/* Header Right Side: Firebase Storage Badge & Google Sign-In */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
           <div
             style={{
               display: 'flex',
@@ -156,6 +158,10 @@ export const App: React.FC = () => {
               <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#f59e0b' }} title="Storage Config Active" />
             )}
           </div>
+
+          <div style={{ borderLeft: '1px solid #334155', paddingLeft: '12px' }}>
+            <GoogleAuth onUserChange={setGoogleUser} />
+          </div>
         </div>
       </header>
 
@@ -165,6 +171,7 @@ export const App: React.FC = () => {
           <ScrapeForm
             onScrapeComplete={fetchStatusAndCount}
             onNavigateToGallery={() => setActiveTab('gallery')}
+            googleUser={googleUser}
           />
         )}
         {activeTab === 'gallery' && (

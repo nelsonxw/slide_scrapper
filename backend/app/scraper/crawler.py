@@ -13,6 +13,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from app.scraper.detector import is_powerpoint_content, is_powerpoint_url_or_header
+from app.scraper.browser_driver import BrowserDownloader
 
 
 @dataclass
@@ -32,6 +33,11 @@ class SiteScraper:
         max_crawl_pages: int = 30,
         max_depth: int = 3,
         user_agent: str | None = None,
+        cookies: str | dict[str, str] | None = None,
+        custom_headers: dict[str, str] | None = None,
+        google_token: str | None = None,
+        user_email: str | None = None,
+        use_browser: bool = True,
     ):
         self.target_url = target_url.strip()
         if not self.target_url.startswith(("http://", "https://")):
@@ -39,18 +45,62 @@ class SiteScraper:
 
         self.max_crawl_pages = max_crawl_pages
         self.max_depth = max_depth
+        self.google_token = google_token
+        self.user_email = user_email
+        self.use_browser = use_browser
         self.headers = {
             "User-Agent": user_agent
             or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
         }
+        if google_token:
+            self.headers["Authorization"] = f"Bearer {google_token}"
+        if custom_headers:
+            self.headers.update(custom_headers)
+
+        self.cookies: dict[str, str] = {}
+        if isinstance(cookies, str) and cookies.strip():
+            clean_cookie_str = cookies.replace("Cookie:", "").replace("cookie:", "").strip()
+            for item in re.split(r"[;\n\r]+", clean_cookie_str):
+                if "=" in item:
+                    k, v = item.strip().split("=", 1)
+                    if k.strip():
+                        self.cookies[k.strip()] = v.strip()
+        elif isinstance(cookies, dict):
+            self.cookies = cookies
 
     def _is_download_element(self, tag: BeautifulSoup, href_or_action: str) -> bool:
         """
-        Detects if a tag (<a>, <button>, <form>, etc.) is a download button or PowerPoint link.
+        Detects if a tag (<a>, <button>, <form>, <input>, etc.) represents a download button or direct PowerPoint download link.
         """
-        # Check download attribute
+        href_lower = href_or_action.lower().split("?")[0]
+
+        # Ignore Google Docs/Slides, Canva, social media, and non-PowerPoint third-party services
+        if any(ignored in href_lower for ignored in ["docs.google.com", "slides.google.com", "canva.com", "linkedin.com", "twitter.com", "facebook.com", "pinterest.com"]):
+            return False
+
+        # Exclude static assets
+        if any(
+            href_lower.endswith(ext)
+            for ext in [".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".mp4", ".mp3", ".pdf", ".zip"]
+        ):
+            return False
+
+        # Exclude pure category/tag/blog browsing urls
+        if any(
+            p in href_lower
+            for p in ["/category/", "/tag/", "/author/", "/blog/", "/terms/", "/privacy/", "/contact/", "/about/"]
+        ):
+            # Unless the URL explicitly targets a pptx file or download endpoint
+            if not href_lower.endswith((".pptx", ".ppt", ".potx", ".ppsx")) and "download" not in href_lower:
+                return False
+
+        # Direct PowerPoint file extensions
+        if href_lower.endswith((".pptx", ".ppt", ".potx", ".ppsx")):
+            return True
+
+        # Tag has HTML5 'download' attribute
         if tag.has_attr("download"):
             return True
 
@@ -59,35 +109,31 @@ class SiteScraper:
         aria_label = tag.get("aria-label", "").lower()
         classes = " ".join(tag.get("class", [])).lower() if tag.get("class") else ""
         elem_id = tag.get("id", "").lower()
-        all_text = f"{text} {title_attr} {aria_label} {classes} {elem_id}"
+        tag_value = tag.get("value", "").lower() if tag.has_attr("value") else ""
+        all_text = f"{text} {title_attr} {aria_label} {classes} {elem_id} {tag_value}"
 
-        # PowerPoint specific clues
-        is_ppt_mentioned = any(
-            k in all_text for k in ["powerpoint", "pptx", "ppt", "slide", "slides", "template", "deck"]
-        )
-        is_download_action = any(
-            k in all_text
-            for k in [
-                "download",
-                "get ppt",
-                "get template",
-                "free download",
-                "telecharger",
-                "descargar",
-                "herunterladen",
-                "télécharger",
-            ]
-        )
+        # Check for explicit PowerPoint download action keywords
+        download_action_keywords = [
+            "download",
+            "get ppt",
+            "get pptx",
+            "get template",
+            "free download",
+            "download powerpoint",
+            "download pptx",
+            "download presentation",
+            "telecharger",
+            "descargar",
+            "herunterladen",
+            "télécharger",
+            "download-btn",
+            "download-button",
+            "download-area",
+            "btn-download",
+        ]
+        has_download_action = any(k in all_text for k in download_action_keywords) or "download" in href_lower
 
-        if is_download_action or is_ppt_mentioned:
-            return True
-
-        # Check URL patterns
-        href_lower = href_or_action.lower().split("?")[0]
-        if href_lower.endswith((".pptx", ".ppt", ".potx", ".ppsx")):
-            return True
-
-        if "download" in href_or_action.lower() and ("ppt" in href_or_action.lower() or "slide" in href_or_action.lower() or "file" in href_or_action.lower()):
+        if has_download_action:
             return True
 
         return False
@@ -127,6 +173,7 @@ class SiteScraper:
 
         with httpx.Client(
             headers=self.headers,
+            cookies=self.cookies,
             timeout=20.0,
             follow_redirects=True,
             verify=False,
@@ -182,11 +229,18 @@ class SiteScraper:
                 # Parse HTML for download buttons and links
                 soup = BeautifulSoup(resp.text, "html.parser")
 
-                # 1. Search <a> links and download buttons
+                # 1. Search <a> links, download buttons, and download form submits
                 candidate_download_links: list[tuple[str, str]] = []  # (url, title)
 
-                for tag in soup.find_all(["a", "button", "form", "div", "span"]):
-                    href = tag.get("href") or tag.get("data-href") or tag.get("data-url") or tag.get("action")
+                for tag in soup.find_all(["a", "button", "form", "input", "div", "span"]):
+                    href = (
+                        tag.get("href")
+                        or tag.get("data-href")
+                        or tag.get("data-url")
+                        or tag.get("action")
+                        or tag.get("formaction")
+                        or (tag.find_parent("form").get("action") if tag.find_parent("form") else None)
+                    )
                     if not href or href.startswith(("javascript:", "mailto:", "tel:", "#")):
                         continue
 
@@ -195,11 +249,12 @@ class SiteScraper:
                     if self._is_download_element(tag, href):
                         link_title = (
                             tag.get_text(strip=True)
+                            or tag.get("value")
                             or tag.get("title")
                             or tag.get("aria-label")
                             or self._extract_title_from_url(full_url)
                         )
-                        clean_title = re.sub(r"(?i)\b(download|free|pptx|ppt|powerpoint|template|get)\b", "", link_title).strip()
+                        clean_title = re.sub(r"(?i)\b(download|free|pptx|ppt|powerpoint|template|get)\b", "", str(link_title)).strip()
                         clean_title = clean_title or self._extract_title_from_url(full_url)
                         candidate_download_links.append((full_url, clean_title))
 
@@ -223,6 +278,9 @@ class SiteScraper:
 
                 # 2. Queue internal sub-pages for crawling
                 if depth < self.max_depth:
+                    parsed_initial = urlparse(self.target_url)
+                    initial_path = parsed_initial.path.rstrip("/")
+
                     for a in soup.find_all("a", href=True):
                         href = a["href"].strip()
                         if not href or href.startswith(("javascript:", "mailto:", "tel:", "#")):
@@ -232,7 +290,21 @@ class SiteScraper:
 
                         # Crawl within same root domain
                         if parsed_sub.netloc.lower() == root_domain:
-                            sub_path = parsed_sub.path.lower()
+                            sub_path = parsed_sub.path.lower().rstrip("/")
+
+                            # Exclude homepage if initial URL was a specific sub-page
+                            if initial_path and initial_path != "" and (sub_path == "" or sub_path == "/"):
+                                continue
+
+                            # Exclude account, auth, pricing, legal, and utility pages
+                            excluded_paths = [
+                                "/account", "/login", "/signup", "/register", "/plans", "/pricing",
+                                "/cart", "/checkout", "/privacy", "/terms", "/contact", "/about",
+                                "/faq", "/author", "/user", "/wp-login", "/wp-admin", "/cdn-cgi",
+                            ]
+                            if any(sub_path.startswith(exp) or f"{exp}/" in sub_path for exp in excluded_paths):
+                                continue
+
                             # Skip non-HTML static assets
                             if not sub_path.endswith(
                                 (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".pdf", ".zip", ".css", ".js", ".mp4", ".mp3", ".json", ".xml")
@@ -249,7 +321,7 @@ class SiteScraper:
         try:
             if client:
                 return client.get(url, headers=self.headers, timeout=30.0, follow_redirects=True)
-            with httpx.Client(headers=self.headers, timeout=30.0, follow_redirects=True, verify=False) as temp_client:
+            with httpx.Client(headers=self.headers, cookies=self.cookies, timeout=30.0, follow_redirects=True, verify=False) as temp_client:
                 return temp_client.get(url)
         except Exception:
             return None
@@ -268,6 +340,7 @@ class SiteScraper:
         try:
             resp = self._fetch_url(url, client=client)
             if not resp or resp.status_code != 200:
+                log(f"Candidate request to {url} returned HTTP {resp.status_code if resp else 'Error'}")
                 return None
 
             is_ppt, fmt = is_powerpoint_content(resp.content)
@@ -282,13 +355,13 @@ class SiteScraper:
                     file_size=len(resp.content),
                 )
             else:
-                # If HTML returned (e.g. download landing page), check if it contains an inner direct PPT link
+                # Check if the response was an HTML page with an inner direct PPT link
                 if b"<html" in resp.content[:1000].lower():
                     sub_soup = BeautifulSoup(resp.text, "html.parser")
                     inner_a = sub_soup.find("a", href=re.compile(r"\.(?:pptx|ppt)(?:\?.*)?$", re.IGNORECASE))
                     if inner_a and inner_a.get("href"):
                         inner_url = urljoin(url, inner_a["href"])
-                        log(f"Following inner download link: {inner_url}")
+                        log(f"Following inner download link from landing page: {inner_url}")
                         inner_resp = self._fetch_url(inner_url, client=client)
                         if inner_resp and inner_resp.status_code == 200:
                             inner_is_ppt, inner_fmt = is_powerpoint_content(inner_resp.content)
@@ -302,6 +375,37 @@ class SiteScraper:
                                     content_bytes=inner_resp.content,
                                     file_size=len(inner_resp.content),
                                 )
+
+                    # Check if the page is an account login/signup gate or interactive download form
+                    page_text = resp.text.lower()
+                    is_gated_form = (
+                        any(g in str(resp.url).lower() for g in ["/signup", "/login", "/register", "/plans"])
+                        or "create free account" in page_text
+                        or "rcp_user_pass" in page_text
+                        or "complete the form" in page_text
+                    )
+
+                    if is_gated_form:
+                        log(f"Detected interactive download form on {source_page_url}.")
+                        if self.use_browser:
+                            log(f"Launching automated browser session to intercept file download...")
+                            try:
+                                b_driver = BrowserDownloader()
+                                res = b_driver.download_powerpoint_from_page(source_page_url, log=log)
+                                if res:
+                                    name, content = res
+                                    return DiscoveredPowerPoint(
+                                        title=name.replace(".pptx", "").replace("_", " ").title(),
+                                        download_url=source_page_url,
+                                        source_page_url=source_page_url,
+                                        format_type="pptx",
+                                        content_bytes=content,
+                                        file_size=len(content),
+                                    )
+                            except Exception as b_err:
+                                log(f"Browser automation error: {b_err}")
+                        else:
+                            log(f"Download endpoint ({url}) requires an active user login/signup session.")
         except Exception as e:
             log(f"Error checking download candidate {url}: {e}")
 
