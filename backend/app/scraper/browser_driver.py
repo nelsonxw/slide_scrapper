@@ -7,7 +7,11 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
+import subprocess
 import tempfile
+import threading
+import time
 import webbrowser
 from pathlib import Path
 from typing import Callable
@@ -23,184 +27,72 @@ class BrowserDownloader:
         self.user_data_dir.mkdir(parents=True, exist_ok=True)
         self.headless = headless
 
-    def extract_cookies_after_login(self, log: Callable[[str], None] | None = None) -> str:
-        """
-        Opens a browser for manual login and automatically extracts cookies after login.
-        Returns the cookies as a string for use in automated scraping.
-        """
-        def _log(msg: str):
-            if log:
-                log(msg)
-
-        _log("[Browser Automation] Launching browser for login and cookie extraction...")
-
+    def get_session_cookie_header(self) -> str:
+        """Reads the locally persisted browser session for internal scraper use only."""
         with sync_playwright() as p:
-            # Use realistic browser settings to appear as normal as possible
-            launch_kwargs = {
-                "user_data_dir": str(self.user_data_dir),
-                "headless": False,
-                "accept_downloads": True,
-                "viewport": {"width": 1920, "height": 1080},
-                "ignore_default_args": ["--enable-automation", "--enable-blink-features=AutomationControlled"],
-                "args": [
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-infobars",
-                    "--disable-dev-shm-usage",
-                    "--disable-web-security",
-                    "--disable-features=IsolateOrigins,site-per-process,VizDisplayCompositor",
-                    "--disable-background-networking",
-                    "--disable-default-apps",
-                    "--disable-extensions",
-                    "--disable-sync",
-                    "--disable-translate",
-                    "--hide-scrollbars",
-                    "--metrics-recording-only",
-                    "--mute-audio",
-                    "--no-first-run",
-                    "--safebrowsing-disable-auto-update",
-                    "--disable-ipc-flooding-protection",
-                ],
-                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            }
-
-            context: BrowserContext = None
-            for ch in ["chrome", "msedge", None]:
-                try:
-                    kwargs = dict(launch_kwargs)
-                    if ch:
-                        kwargs["channel"] = ch
-                    context = p.chromium.launch_persistent_context(**kwargs)
-                    break
-                except Exception:
-                    continue
-
-            if not context:
-                context = p.chromium.launch_persistent_context(**launch_kwargs)
-
-            # Evade navigator.webdriver detection
-            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-
+            context = p.chromium.launch_persistent_context(
+                channel="chrome",
+                user_data_dir=str(self.user_data_dir),
+                headless=True,
+                accept_downloads=True,
+            )
             try:
-                # Open Google login page first
-                page1: Page = context.new_page()
-                try:
-                    page1.goto("https://accounts.google.com/", wait_until="domcontentloaded")
-                    _log("[Browser Automation] Google login page opened - please log in to your Google account")
-                except Exception as e:
-                    _log(f"[Browser Automation] Warning: Could not open Google login page: {e}")
-
-                # Open SlideModel login page
-                page2: Page = context.new_page()
-                try:
-                    page2.goto("https://www.slidemodel.com/account/login/", wait_until="domcontentloaded")
-                    page2.wait_for_timeout(3000)
-                    _log("[Browser Automation] SlideModel login page opened")
-                except Exception as e:
-                    _log(f"[Browser Automation] Warning: Could not open SlideModel login page: {e}")
-
-                # Keep browser open for manual login
-                _log("[Browser Automation] Browser window is open. Please log in to Google on Tab 1, then complete authentication on Tab 2.")
-                _log("[Browser Automation] Close the browser window when finished to automatically extract cookies.")
-
-                # Wait indefinitely until browser is closed
-                try:
-                    while True:
-                        page2.wait_for_timeout(5000)
-                except Exception:
-                    _log("[Browser Automation] Browser closed. Extracting cookies...")
-
-                # Extract cookies from the context
                 cookies = context.cookies()
-                _log(f"[Browser Automation] Extracted {len(cookies)} cookies from browser session")
-
-                # Format cookies as a string for HTTP requests
-                cookie_string = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
-                _log(f"[Browser Automation] Cookie string ready (length: {len(cookie_string)} characters)")
-
-                return cookie_string
-
+                return "; ".join(f"{cookie['name']}={cookie['value']}" for cookie in cookies)
             finally:
                 context.close()
 
-    def open_browser_login(self, log: Callable[[str], None] | None = None) -> None:
-        """
-        Opens a visible browser window for manual login to target websites.
-        Preserves the session for future automated scrapes.
-        """
+    def clear_session(self) -> None:
+        """Removes the persisted browser profile after the user requests sign-out."""
+        import shutil
+
+        if self.user_data_dir.exists():
+            shutil.rmtree(self.user_data_dir)
+        self.user_data_dir.mkdir(parents=True, exist_ok=True)
+
+    def open_browser_login(
+        self,
+        url: str,
+        log: Callable[[str], None] | None = None,
+        stop_event: threading.Event | None = None,
+    ) -> None:
+        """Opens the target URL in a dedicated Chrome profile for manual authentication."""
         def _log(msg: str):
             if log:
                 log(msg)
 
-        _log("[Browser Automation] Launching visible browser for manual login...")
+        chrome_candidates = [
+            shutil.which("chrome.exe"),
+            os.path.join(os.environ.get("PROGRAMFILES", ""), "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(os.environ.get("PROGRAMFILES(X86)", ""), "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "Application", "chrome.exe"),
+        ]
+        chrome_path = next((candidate for candidate in chrome_candidates if candidate and os.path.exists(candidate)), None)
+        if not chrome_path:
+            raise RuntimeError("Google Chrome executable was not found")
 
-        with sync_playwright() as p:
-            launch_kwargs = {
-                "user_data_dir": str(self.user_data_dir),
-                "headless": False,
-                "accept_downloads": True,
-                "viewport": {"width": 1280, "height": 800},
-                "ignore_default_args": ["--enable-automation"],
-                "args": [
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-infobars",
-                    "--disable-web-security",
-                    "--disable-features=IsolateOrigins,site-per-process",
-                ],
-                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            }
+        self.user_data_dir.mkdir(parents=True, exist_ok=True)
+        command = [
+            chrome_path,
+            f"--user-data-dir={self.user_data_dir}",
+            "--new-window",
+            "--start-maximized",
+            "--no-first-run",
+            "--no-default-browser-check",
+            url,
+        ]
+        _log("[Browser Automation] Launching the target page in a dedicated Chrome session...")
+        browser_process = subprocess.Popen(command)
+        _log(f"[Browser Automation] Target page opened in Chrome: {url}")
+        _log("[Browser Automation] Complete any site or Google authentication prompts manually.")
 
-            context: BrowserContext = None
-            for ch in ["chrome", "msedge", None]:
-                try:
-                    kwargs = dict(launch_kwargs)
-                    if ch:
-                        kwargs["channel"] = ch
-                    context = p.chromium.launch_persistent_context(**kwargs)
-                    break
-                except Exception:
-                    continue
+        while browser_process.poll() is None:
+            if stop_event and stop_event.wait(timeout=1):
+                browser_process.terminate()
+                break
+            time.sleep(0.1)
 
-            if not context:
-                context = p.chromium.launch_persistent_context(**launch_kwargs)
-
-            # Evade navigator.webdriver detection
-            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-
-            try:
-                # Open Google login page first to establish Google session
-                page1: Page = context.new_page()
-                try:
-                    page1.goto("https://accounts.google.com/", wait_until="domcontentloaded")
-                    _log("[Browser Automation] Google login page opened - please log in to your Google account first")
-                except Exception as e:
-                    _log(f"[Browser Automation] Warning: Could not open Google login page: {e}")
-
-                # Open SlideModel login page
-                page2: Page = context.new_page()
-                try:
-                    page2.goto("https://www.slidemodel.com/account/login/", wait_until="domcontentloaded")
-                    page2.wait_for_timeout(3000)
-                    _log("[Browser Automation] SlideModel login page opened")
-                except Exception as e:
-                    _log(f"[Browser Automation] Warning: Could not open SlideModel login page: {e}")
-                    _log("[Browser Automation] You can manually navigate to any site requiring login in the browser window.")
-
-                # Keep browser open for manual login
-                _log("[Browser Automation] Browser window is open. Tab 1: Google login, Tab 2: SlideModel login.")
-                _log("[Browser Automation] Log in to Google on Tab 1 first, then complete Google authentication on Tab 2.")
-                _log("[Browser Automation] Close the browser window when finished to save your session.")
-
-                # Wait indefinitely until browser is closed
-                try:
-                    while True:
-                        page2.wait_for_timeout(5000)
-                except Exception:
-                    _log("[Browser Automation] Browser closed. Session saved.")
-
-            finally:
-                context.close()
+        _log("[Browser Automation] Chrome session closed. Browser session saved locally.")
 
     def download_powerpoint_from_page(
         self,
@@ -258,6 +150,13 @@ class BrowserDownloader:
                 _log(f"[Browser Automation] Navigating to target page...")
                 page.goto(url, wait_until="domcontentloaded")
                 page.wait_for_timeout(2000)
+
+                login_link = page.locator("a[href*='/account/login']").first
+                email_field = page.locator("input[name='rcp_user_email']").first
+                if login_link.is_visible() and email_field.is_visible():
+                    _log("[Browser Automation] The saved Chrome session is not authenticated to the target site.")
+                    _log("[Browser Automation] Complete the target site's login in Chrome, then click Login complete before scraping.")
+                    return None
 
                 # 1. Search for download candidates on the page
                 download_selectors = [

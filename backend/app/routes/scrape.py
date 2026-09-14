@@ -25,9 +25,6 @@ class StartScrapeRequest(BaseModel):
     url: str = Field(..., description="Target website URL to scrape")
     max_pages: int = Field(default=25, ge=1, le=100, description="Max sub-pages to crawl")
     max_depth: int = Field(default=2, ge=0, le=5, description="Max crawl depth (0 = target page only)")
-    cookies: str | None = Field(default=None, description="Optional raw session cookies string")
-    google_token: str | None = Field(default=None, description="Optional Google OAuth/ID token")
-    user_email: str | None = Field(default=None, description="Optional signed-in user email")
 
 
 class ScrapeTaskStatus(BaseModel):
@@ -56,9 +53,6 @@ def _run_scrape_pipeline(
     max_pages: int,
     max_depth: int,
     stop_event: threading.Event,
-    cookies: str | None = None,
-    google_token: str | None = None,
-    user_email: str | None = None,
 ):
     task = tasks[task_id]
     task["status"] = "running"
@@ -76,19 +70,22 @@ def _run_scrape_pipeline(
 
     try:
         log(f"Starting discovery on {target_url} (depth <= {max_depth}, max_pages <= {max_pages})")
-        if user_email:
-            log(f"Authenticated as Google User: {user_email}")
-        if cookies:
-            log("Session cookies configured for authenticated requests.")
+        from app.scraper.browser_driver import BrowserDownloader
+
+        try:
+            session_cookies = BrowserDownloader().get_session_cookie_header()
+        except Exception as session_error:
+            session_cookies = ""
+            log(f"Saved browser session is unavailable; continuing without it: {session_error}")
+        if session_cookies:
+            log("Using the locally saved browser session for authenticated requests.")
         task["current_step"] = "Crawling site & searching for download buttons..."
 
         scraper = SiteScraper(
             target_url=target_url,
             max_crawl_pages=max_pages,
             max_depth=max_depth,
-            cookies=cookies,
-            google_token=google_token,
-            user_email=user_email,
+            cookies=session_cookies or None,
         )
 
         discovered_ppts: list[DiscoveredPowerPoint] = []
@@ -228,9 +225,6 @@ def start_scrape_task(request: StartScrapeRequest):
             request.max_pages,
             request.max_depth,
             stop_event,
-            request.cookies,
-            request.google_token,
-            request.user_email,
         ),
         daemon=True,
     )
@@ -264,29 +258,76 @@ class OpenBrowserLoginRequest(BaseModel):
     url: str = Field(default="https://slidemodel.com/account/login/", description="Website URL to log in to")
 
 
+session_state = {
+    "status": "not_connected",
+    "site": None,
+    "message": "No saved browser session.",
+}
+login_stop_event: threading.Event | None = None
+
+
+@router.get("/session")
+def get_browser_session_status():
+    """Returns browser-session status without exposing credentials or cookies."""
+    return session_state
+
+
 @router.post("/open-browser-login")
 def open_browser_login(req: OpenBrowserLoginRequest):
-    """
-    Opens a browser for manual login and automatically extracts cookies after login.
-    Returns the extracted cookies for use in automated scraping.
-    """
-    import queue
+    """Starts a visible Chrome session and returns immediately while it remains open."""
+    global login_stop_event
 
-    result_queue = queue.Queue()
+    if session_state["status"] == "browser_open":
+        return session_state
 
-    def _run_browser():
+    login_stop_event = threading.Event()
+    session_state.update({
+        "status": "browser_open",
+        "site": req.url,
+        "message": "Chrome is open. Complete login, then click Login complete or close Chrome.",
+    })
+
+    def _run_browser(stop_event: threading.Event):
         from app.scraper.browser_driver import BrowserDownloader
-        downloader = BrowserDownloader(headless=False)
-        cookies = downloader.extract_cookies_after_login()
-        result_queue.put(cookies)
 
-    # Run in thread
-    thread = threading.Thread(target=_run_browser, daemon=True)
+        try:
+            BrowserDownloader(headless=False).open_browser_login(req.url, stop_event=stop_event)
+            session_state.update({
+                "status": "authenticated",
+                "message": "Browser session saved locally.",
+            })
+        except Exception as error:
+            session_state.update({
+                "status": "error",
+                "message": f"Browser login failed: {error}",
+            })
+
+    thread = threading.Thread(target=_run_browser, args=(login_stop_event,), daemon=True)
     thread.start()
+    return session_state
 
-    # Wait for result with timeout
-    try:
-        cookies = result_queue.get(timeout=300)  # 5 minutes timeout
-        return {"status": "success", "cookies": cookies, "message": "Cookies extracted successfully. They have been automatically filled in the Session Cookies field."}
-    except queue.Empty:
-        return {"status": "timeout", "message": "Login timeout. Please try again."}
+
+@router.post("/session/complete")
+def complete_browser_session():
+    """Marks login complete while leaving Chrome open for a graceful user close."""
+    session_state.update({
+        "status": "authenticated",
+        "message": "Login marked complete. Close the Chrome window normally to persist the session.",
+    })
+    return session_state
+
+
+@router.delete("/session")
+def clear_browser_session():
+    """Clears the locally persisted browser session."""
+    from app.scraper.browser_driver import BrowserDownloader
+
+    if login_stop_event:
+        login_stop_event.set()
+    BrowserDownloader().clear_session()
+    session_state.update({
+        "status": "not_connected",
+        "site": None,
+        "message": "Saved browser session cleared.",
+    })
+    return session_state

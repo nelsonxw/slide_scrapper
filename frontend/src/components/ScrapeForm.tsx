@@ -2,12 +2,11 @@ import React, { useState, useEffect, useRef } from 'react';
 import { api, ScrapeTaskStatus } from '../api/client';
 import { IconGlobe, IconLayers, IconCheckCircle, IconAlertTriangle, IconCloud } from './Icons';
 
-import { GoogleUserProfile } from './GoogleAuth';
+import { BrowserSessionAuth } from './BrowserSessionAuth';
 
 interface ScrapeFormProps {
   onScrapeComplete?: () => void;
   onNavigateToGallery?: () => void;
-  googleUser?: GoogleUserProfile | null;
 }
 
 const PRESET_URLS = [
@@ -15,12 +14,10 @@ const PRESET_URLS = [
   { label: 'Sample PowerPoint Repository', url: 'https://github.com/microsoft/PowerPoint-Add-in-Samples' },
 ];
 
-export const ScrapeForm: React.FC<ScrapeFormProps> = ({ onScrapeComplete, onNavigateToGallery, googleUser }) => {
+export const ScrapeForm: React.FC<ScrapeFormProps> = ({ onScrapeComplete, onNavigateToGallery }) => {
   const [url, setUrl] = useState('');
   const [maxPages, setMaxPages] = useState(20);
   const [maxDepth, setMaxDepth] = useState(2);
-  const [cookies, setCookies] = useState('');
-  const [showAdvanced, setShowAdvanced] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [activeTask, setActiveTask] = useState<ScrapeTaskStatus | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -67,9 +64,6 @@ export const ScrapeForm: React.FC<ScrapeFormProps> = ({ onScrapeComplete, onNavi
         url: url.trim(),
         max_pages: maxPages,
         max_depth: maxDepth,
-        cookies: cookies.trim() ? cookies.trim() : undefined,
-        google_token: googleUser?.token,
-        user_email: googleUser?.email,
       });
       setActiveTask(task);
     } catch (err: any) {
@@ -304,98 +298,7 @@ export const ScrapeForm: React.FC<ScrapeFormProps> = ({ onScrapeComplete, onNavi
             </div>
           </div>
 
-          {/* Advanced Authentication / Cookies Toggle */}
-          <div>
-            <button
-              type="button"
-              onClick={() => setShowAdvanced((prev) => !prev)}
-              style={{
-                background: 'none',
-                border: 'none',
-                color: 'var(--primary)',
-                fontSize: '13px',
-                fontWeight: '700',
-                padding: '4px 0',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                cursor: 'pointer',
-              }}
-            >
-              <span>{showAdvanced ? '▲ Hide Advanced / Auth Settings' : '▼ Advanced / Session Cookies (Optional for logged-in sites)'}</span>
-            </button>
-
-            {showAdvanced && (
-              <div
-                style={{
-                  marginTop: '10px',
-                  padding: '16px',
-                  background: 'var(--slate-50)',
-                  borderRadius: 'var(--radius-md)',
-                  border: '1px solid var(--slate-200)',
-                  display: 'flex',
-                  flexDirection: 'column',
-                  gap: '8px',
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '4px' }}>
-                  <label style={{ fontSize: '12px', fontWeight: '700', color: 'var(--slate-700)' }}>
-                    Session Cookie / Headers (Optional)
-                  </label>
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      try {
-                        const res = await api.openBrowserLogin(url.trim() || 'https://slidemodel.com/account/login/');
-                        if (res.status === 'success' && res.cookies) {
-                          setCookies(res.cookies);
-                          alert('Cookies extracted successfully and automatically filled in!');
-                        } else {
-                          alert(res.message);
-                        }
-                      } catch (err: any) {
-                        alert(err.message);
-                      }
-                    }}
-                    style={{
-                      background: 'var(--primary)',
-                      color: '#ffffff',
-                      border: 'none',
-                      padding: '4px 10px',
-                      borderRadius: 'var(--radius-sm)',
-                      fontSize: '11px',
-                      fontWeight: '700',
-                      cursor: 'pointer',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '4px',
-                    }}
-                  >
-                    <span>🌐 Auto-Extract Cookies After Login</span>
-                  </button>
-                </div>
-                <textarea
-                  rows={2}
-                  placeholder="e.g. wordpress_logged_in_...=...; rcp_user_...=..."
-                  value={cookies}
-                  onChange={(e) => setCookies(e.target.value)}
-                  disabled={Boolean(isRunning)}
-                  style={{
-                    width: '100%',
-                    padding: '8px 12px',
-                    borderRadius: 'var(--radius-md)',
-                    border: '1px solid var(--slate-300)',
-                    fontSize: '12px',
-                    fontFamily: 'JetBrains Mono, monospace',
-                    outline: 'none',
-                  }}
-                />
-                <span style={{ fontSize: '11px', color: 'var(--slate-500)' }}>
-                  💡 Click "Auto-Extract Cookies After Login" to open a browser window. Log in to Google on Tab 1, then complete authentication on Tab 2. Close the browser when finished - cookies will be automatically extracted and filled in above.
-                </span>
-              </div>
-            )}
-          </div>
+          <BrowserSessionAuth targetUrl={url} />
         </form>
       </div>
 

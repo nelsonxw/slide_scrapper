@@ -44,6 +44,12 @@ export interface StorageStatus {
   error?: string | null;
 }
 
+export interface BrowserSessionStatus {
+  status: 'not_connected' | 'connecting' | 'browser_open' | 'authenticated' | 'timeout' | 'error';
+  site: string | null;
+  message: string;
+}
+
 export interface DeleteSlidesResponse {
   deleted_count: number;
   success: boolean;
@@ -57,9 +63,6 @@ export const api = {
     url: string;
     max_pages?: number;
     max_depth?: number;
-    cookies?: string;
-    google_token?: string;
-    user_email?: string;
   }): Promise<ScrapeTaskStatus> {
     const res = await fetch(`${API_BASE}/scrape/start`, {
       method: 'POST',
@@ -68,9 +71,6 @@ export const api = {
         url: params.url,
         max_pages: params.max_pages ?? 25,
         max_depth: params.max_depth ?? 2,
-        cookies: params.cookies || undefined,
-        google_token: params.google_token || undefined,
-        user_email: params.user_email || undefined,
       }),
     });
     if (!res.ok) {
@@ -92,14 +92,38 @@ export const api = {
     await fetch(`${API_BASE}/scrape/cancel/${taskId}`, { method: 'POST' });
   },
 
-  async openBrowserLogin(url?: string): Promise<{ status: string; message: string; cookies?: string }> {
+  async getBrowserSession(): Promise<BrowserSessionStatus> {
+    const res = await fetch(`${API_BASE}/scrape/session`);
+    if (!res.ok) {
+      throw new Error('Failed to get browser session status');
+    }
+    return res.json();
+  },
+
+  async openBrowserLogin(url: string): Promise<BrowserSessionStatus> {
     const res = await fetch(`${API_BASE}/scrape/open-browser-login`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: url || 'https://slidemodel.com/account/login/' }),
+      body: JSON.stringify({ url }),
     });
     if (!res.ok) {
       throw new Error('Failed to open browser session');
+    }
+    return res.json();
+  },
+
+  async completeBrowserSession(): Promise<BrowserSessionStatus> {
+    const res = await fetch(`${API_BASE}/scrape/session/complete`, { method: 'POST' });
+    if (!res.ok) {
+      throw new Error('Failed to complete browser session');
+    }
+    return res.json();
+  },
+
+  async clearBrowserSession(): Promise<BrowserSessionStatus> {
+    const res = await fetch(`${API_BASE}/scrape/session`, { method: 'DELETE' });
+    if (!res.ok) {
+      throw new Error('Failed to clear browser session');
     }
     return res.json();
   },

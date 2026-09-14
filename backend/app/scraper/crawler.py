@@ -35,8 +35,6 @@ class SiteScraper:
         user_agent: str | None = None,
         cookies: str | dict[str, str] | None = None,
         custom_headers: dict[str, str] | None = None,
-        google_token: str | None = None,
-        user_email: str | None = None,
         use_browser: bool = True,
     ):
         self.target_url = target_url.strip()
@@ -45,8 +43,6 @@ class SiteScraper:
 
         self.max_crawl_pages = max_crawl_pages
         self.max_depth = max_depth
-        self.google_token = google_token
-        self.user_email = user_email
         self.use_browser = use_browser
         self.headers = {
             "User-Agent": user_agent
@@ -54,8 +50,6 @@ class SiteScraper:
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
         }
-        if google_token:
-            self.headers["Authorization"] = f"Bearer {google_token}"
         if custom_headers:
             self.headers.update(custom_headers)
 

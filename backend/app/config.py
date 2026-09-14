@@ -26,6 +26,14 @@ class Settings(BaseModel):
     data_dir: Path = BASE_DIR / "data"
     host: str = os.getenv("HOST", "0.0.0.0")
     port: int = int(os.getenv("PORT", "8000"))
+    frontend_origins: list[str] = [
+        origin.strip()
+        for origin in os.getenv(
+            "FRONTEND_ORIGINS",
+            "http://localhost:5173,http://127.0.0.1:5173",
+        ).split(",")
+        if origin.strip()
+    ]
 
     def resolve_credentials_path(self) -> Path | None:
         raw_path = self.credentials_path
