@@ -25,7 +25,7 @@ A standalone full-stack web application that crawls websites and their sub-pages
 4. **Modern Responsive React Frontend (`frontend/`)**:
    - **Tab 1: Scrape & Discover**: Enter target site URL, adjust max sub-pages and crawl depth, with live progress logs and metric counters.
    - **Tab 2: Slide Gallery & Preview**: Card grid of all uploaded slides, slide number badges, full-screen lightbox preview modal, search filtering, multi-select checkboxes, Select All, and **"Delete Selected"** action from Firebase Storage.
-   - **Browser-Based Login**: Click "🌐 Open Browser for Google Login" to open a visible browser window for manual authentication on gated sites (e.g., SlideModel). The session is preserved for all future automated scrapes.
+   - **Browser-Based Login**: Click **Open target in Chrome** to open a dedicated browser profile. Complete the target site's username/password login in that window; the session is preserved for future automated scrapes.
 
 ---
 
@@ -77,19 +77,14 @@ PORT=8000
 
 For websites that require user authentication (e.g., SlideModel free templates):
 
-**Why Google One-Tap doesn't work in automated browsers:**
-Google has anti-automation protections that detect when a browser is controlled by automation tools (like Playwright) and blocks Google One-Tap to prevent fraud. This is why the automated browser cannot show Google One-Tap.
+**Username/password login flow**
 
-**Solution: Automatic Cookie Extraction**
+1. In the **Scrape & Discover** tab, enter the target URL and click **Open target in Chrome**.
+2. In the dedicated Chrome window, use the target site's own username/password login form.
+3. Confirm the site shows the authenticated account state, click **Mark login complete**, and close Chrome normally.
+4. Start a new scrape. The saved browser profile is reused for authenticated downloads.
 
-1. In the **Scrape & Discover** tab, click **"🌐 Auto-Extract Cookies After Login"** in the Advanced section.
-2. A browser window will open with two tabs:
-   - **Tab 1**: Google login page - sign in with your Google account
-   - **Tab 2**: SlideModel login page - complete Google One-Tap authentication
-3. **Close the browser window** when finished - cookies are automatically extracted and filled in the Session Cookies field
-4. All future scrapes will use these cookies to download gated content without additional login prompts
-
-This approach is completely automatic - no manual cookie copying required!
+Credentials and cookie values are never displayed in the application diagnostics.
 
 ---
 

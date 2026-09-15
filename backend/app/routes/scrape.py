@@ -78,7 +78,8 @@ def _run_scrape_pipeline(
             session_cookies = ""
             log(f"Saved browser session is unavailable; continuing without it: {session_error}")
         if session_cookies:
-            log("Using the locally saved browser session for authenticated requests.")
+            cookie_count = len([entry for entry in session_cookies.split(";") if "=" in entry])
+            log(f"Using the locally saved browser session for authenticated requests ({cookie_count} cookie entries loaded; values hidden).")
         task["current_step"] = "Crawling site & searching for download buttons..."
 
         scraper = SiteScraper(
@@ -147,15 +148,19 @@ def _run_scrape_pipeline(
                         break
 
                     log(f"Uploading slide {slide.slide_index + 1}/{slide.total_slides}: {slide.slide_filename} to Firebase Storage (gs://{settings.storage_bucket})...")
-                    card = storage_service.upload_slide_file(
-                        local_pptx_path=slide.pptx_file_path,
-                        local_preview_path=slide.preview_image_path,
-                        original_source_url=ppt.download_url,
-                        original_presentation_name=ppt.title,
-                        slide_title=slide.title,
-                        slide_index=slide.slide_index,
-                        total_slides=slide.total_slides,
-                    )
+                    try:
+                        card = storage_service.upload_slide_file(
+                            local_pptx_path=slide.pptx_file_path,
+                            local_preview_path=slide.preview_image_path,
+                            original_source_url=ppt.download_url,
+                            original_presentation_name=ppt.title,
+                            slide_title=slide.title,
+                            slide_index=slide.slide_index,
+                            total_slides=slide.total_slides,
+                        )
+                    except Exception as upload_error:
+                        log(f"Firebase upload failed for {slide.slide_filename}: {upload_error}")
+                        raise RuntimeError(f"Firebase upload failed for {slide.slide_filename}") from upload_error
                     uploaded_slides += 1
                     task["uploaded_slides_count"] = uploaded_slides
                     saved_cards.append({
@@ -166,8 +171,9 @@ def _run_scrape_pipeline(
                         "pptx_url": card.pptx_url,
                     })
 
-            except Exception as split_err:
-                log(f"Error splitting '{ppt.title}': {split_err}")
+            except Exception as processing_error:
+                log(f"Error processing '{ppt.title}': {processing_error}")
+                raise
 
         task["saved_slides"] = saved_cards
         if stop_event.is_set():
@@ -262,8 +268,17 @@ session_state = {
     "status": "not_connected",
     "site": None,
     "message": "No saved browser session.",
+    "debug_logs": [],
 }
 login_stop_event: threading.Event | None = None
+
+
+def _session_log(message: str) -> None:
+    timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+    logs = session_state.setdefault("debug_logs", [])
+    logs.append(f"[{timestamp}] {message}")
+    if len(logs) > 50:
+        del logs[:-50]
 
 
 @router.get("/session")
@@ -273,10 +288,14 @@ def get_browser_session_status():
 
     browser = BrowserDownloader()
     browser_open = browser.is_browser_open()
+    if browser_open and session_state["status"] != "browser_open":
+        _session_log("Session poll detected the dedicated Chrome process.")
+    if not browser_open and session_state["status"] == "browser_open":
+        _session_log("Session poll detected that the dedicated Chrome process has closed.")
     if browser_open:
         session_state.update({
             "status": "browser_open",
-            "message": "Chrome is open. Complete login, then click Login complete.",
+            "message": "Chrome is open. Complete SlideModel login in this same window, then click Login complete.",
         })
     elif session_state["status"] == "browser_open":
         session_state.update({
@@ -295,22 +314,39 @@ def open_browser_login(req: OpenBrowserLoginRequest):
         return session_state
 
     login_stop_event = threading.Event()
+    _session_log(f"Opening dedicated Chrome session for target URL: {req.url}")
     session_state.update({
         "status": "browser_open",
         "site": req.url,
-        "message": "Chrome is open. Complete login, then click Login complete or close Chrome.",
+        "message": "Chrome is open. Complete SlideModel login in this same window, then click Login complete and close Chrome normally.",
     })
 
     def _run_browser(stop_event: threading.Event):
         from app.scraper.browser_driver import BrowserDownloader
 
         try:
-            BrowserDownloader(headless=False).open_browser_login(req.url, stop_event=stop_event)
-            session_state.update({
-                "status": "authenticated",
-                "message": "Browser session saved locally.",
-            })
+            browser = BrowserDownloader(headless=False)
+            browser.open_browser_login(req.url, log=_session_log, stop_event=stop_event)
+            _session_log("Dedicated Chrome process ended and the browser profile is available for reading.")
+            authenticated = browser.verify_authenticated_session(req.url, log=_session_log)
+            if authenticated is False and browser.has_persisted_session():
+                _session_log("The profile check disagreed, but the live authenticated cookie capture is available for scraping.")
+                session_state.update({
+                    "status": "authenticated",
+                    "message": "Live login session captured and ready for scraping.",
+                })
+            elif authenticated is False:
+                session_state.update({
+                    "status": "not_authenticated",
+                    "message": "Chrome closed, but SlideModel login was not detected in the saved session.",
+                })
+            else:
+                session_state.update({
+                    "status": "authenticated",
+                    "message": "Browser session saved locally.",
+                })
         except Exception as error:
+            _session_log(f"Browser session error: {error}")
             session_state.update({
                 "status": "error",
                 "message": f"Browser login failed: {error}",
@@ -321,17 +357,35 @@ def open_browser_login(req: OpenBrowserLoginRequest):
     return session_state
 
 
-@router.post("/session/complete")
-def complete_browser_session():
-    """Stops the dedicated Chrome process so its profile can be read by the scraper."""
-    if login_stop_event:
-        login_stop_event.set()
+@router.post("/session/verify")
+def verify_browser_session():
+    """Checks the currently open Chrome page before the user closes it."""
     from app.scraper.browser_driver import BrowserDownloader
 
-    BrowserDownloader(headless=False).close_browser_session()
+    target_url = session_state.get("site")
+    if not target_url:
+        return {**session_state, "status": "error", "message": "No active target URL is available for live authentication verification."}
+
+    try:
+        authenticated = BrowserDownloader(headless=False).verify_live_authenticated_session(target_url, log=_session_log)
+    except Exception as error:
+        _session_log(f"Live authentication check failed: {error}")
+        return {**session_state, "status": "error", "message": f"Live authentication check failed: {error}"}
+
+    if authenticated:
+        session_state.update({"status": "browser_open", "message": "Login detected in the open Chrome session. Close Chrome normally, then scrape."})
+    else:
+        session_state.update({"status": "not_authenticated", "message": "Login was not detected in the open Chrome session."})
+    return session_state
+
+
+@router.post("/session/complete")
+def complete_browser_session():
+    """Marks login complete while leaving Chrome open for a graceful user close."""
+    _session_log("User marked login complete; waiting for Chrome to close normally.")
     session_state.update({
         "status": "authenticated",
-        "message": "Login complete. Chrome is closed and the saved session is ready for scraping.",
+        "message": "Login marked complete. Close the Chrome window normally before starting the scrape.",
     })
     return session_state
 
@@ -341,6 +395,7 @@ def clear_browser_session():
     """Clears the locally persisted browser session."""
     from app.scraper.browser_driver import BrowserDownloader
 
+    _session_log("Clearing the dedicated Chrome profile and saved session.")
     if login_stop_event:
         login_stop_event.set()
     BrowserDownloader().clear_session()

@@ -45,6 +45,9 @@ class SiteScraper:
         self.max_depth = max_depth
         self.use_browser = use_browser
         self._browser_processed_pages: set[str] = set()
+        target_path = urlparse(self.target_url).path.rstrip("/")
+        pagination_match = re.match(r"^(.*)/page$", target_path, re.IGNORECASE)
+        self.pagination_prefix = pagination_match.group(1) + "/page" if pagination_match else None
         self.headers = {
             "User-Agent": user_agent
             or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -65,11 +68,36 @@ class SiteScraper:
         elif isinstance(cookies, dict):
             self.cookies = cookies
 
+    def _is_allowed_pagination_url(self, path: str) -> bool:
+        if not self.pagination_prefix:
+            return True
+        normalized_path = path.rstrip("/")
+        return bool(re.fullmatch(re.escape(self.pagination_prefix) + r"(?:/\d+)?", normalized_path, re.IGNORECASE))
+
     def _is_download_element(self, tag: BeautifulSoup, href_or_action: str) -> bool:
         """
         Detects if a tag (<a>, <button>, <form>, <input>, etc.) represents a download button or direct PowerPoint download link.
         """
         href_lower = href_or_action.lower().split("?")[0]
+        parsed_href = urlparse(href_or_action)
+        href_path = parsed_href.path.lower()
+        if "/account/" in href_path or href_path.startswith(("/login", "/signup", "/register", "/plans")):
+            return False
+
+        is_slidemodel = parsed_href.netloc.endswith("slidemodel.com")
+        if is_slidemodel:
+            is_template_detail = (
+                href_path.startswith("/templates/")
+                and href_path.rstrip("/") != "/templates"
+                and "/tag/" not in href_path
+                and "/category/" not in href_path
+            ) or (
+                href_path.startswith("/free-powerpoint-templates/")
+                and href_path.rstrip("/") != "/free-powerpoint-templates"
+                and "/page/" not in href_path
+            )
+            if is_template_detail:
+                return True
 
         # Ignore Google Docs/Slides, Canva, social media, and non-PowerPoint third-party services
         if any(ignored in href_lower for ignored in ["docs.google.com", "slides.google.com", "canva.com", "linkedin.com", "twitter.com", "facebook.com", "pinterest.com"]):
@@ -150,6 +178,8 @@ class SiteScraper:
         root_domain = parsed_root.netloc.lower()
 
         log(f"Starting crawl on: {self.target_url} (Domain: {root_domain})")
+        if self.pagination_prefix:
+            log(f"Pagination scope enabled: only {self.pagination_prefix}/ and numbered pages will be crawled.")
 
         # Direct check if user provided a direct PPTX download URL
         if is_powerpoint_url_or_header(self.target_url):
@@ -242,7 +272,7 @@ class SiteScraper:
 
                     full_url = urljoin(current_url, href)
 
-                    if self._is_download_element(tag, href):
+                    if self._is_download_element(tag, full_url):
                         link_title = (
                             tag.get_text(strip=True)
                             or tag.get("value")
@@ -287,6 +317,9 @@ class SiteScraper:
                         # Crawl within same root domain
                         if parsed_sub.netloc.lower() == root_domain:
                             sub_path = parsed_sub.path.lower().rstrip("/")
+
+                            if not self._is_allowed_pagination_url(sub_path):
+                                continue
 
                             # Exclude homepage if initial URL was a specific sub-page
                             if initial_path and initial_path != "" and (sub_path == "" or sub_path == "/"):
@@ -378,6 +411,23 @@ class SiteScraper:
                         "form",
                         action=re.compile(r"/download(?:/|\?)", re.IGNORECASE),
                     )
+                    candidate_hostname = (urlparse(url).hostname or "").lower()
+                    candidate_path = urlparse(url).path.lower()
+                    is_slidemodel_template_page = (
+                        (candidate_hostname == "slidemodel.com" or candidate_hostname.endswith(".slidemodel.com"))
+                        and (
+                            (
+                                candidate_path.startswith("/templates/")
+                                and candidate_path.rstrip("/") != "/templates"
+                                and "/tag/" not in candidate_path
+                                and "/category/" not in candidate_path
+                            )
+                            or (
+                                candidate_path.startswith("/free-powerpoint-templates/")
+                                and candidate_path.rstrip("/") != "/free-powerpoint-templates"
+                            )
+                        )
+                    )
                     is_gated_form = (
                         any(g in str(resp.url).lower() for g in ["/signup", "/login", "/register", "/plans"])
                         or (
@@ -397,17 +447,21 @@ class SiteScraper:
                         )
                     )
 
-                    if is_gated_form:
-                        log(f"Detected interactive download form on {source_page_url}.")
+                    if is_gated_form or is_slidemodel_template_page:
+                        if is_gated_form:
+                            log(f"Detected interactive download form on {source_page_url}.")
+                        elif is_slidemodel_template_page:
+                            log(f"Using browser download handling for authenticated template page: {url}")
                         if self.use_browser:
-                            if source_page_url in self._browser_processed_pages:
+                            browser_target_url = url if is_slidemodel_template_page else source_page_url
+                            if browser_target_url in self._browser_processed_pages:
                                 return None
-                            self._browser_processed_pages.add(source_page_url)
-                            log(f"Launching automated browser session to intercept file download...")
+                            self._browser_processed_pages.add(browser_target_url)
+                            log("Launching automated browser session to intercept file download...")
                             try:
                                 b_driver = BrowserDownloader()
                                 res = b_driver.download_powerpoint_from_page(
-                                    source_page_url,
+                                    browser_target_url,
                                     log=log,
                                     session_cookies=self.cookies,
                                 )
@@ -415,7 +469,7 @@ class SiteScraper:
                                     name, content = res
                                     return DiscoveredPowerPoint(
                                         title=name.replace(".pptx", "").replace("_", " ").title(),
-                                        download_url=source_page_url,
+                                        download_url=browser_target_url,
                                         source_page_url=source_page_url,
                                         format_type="pptx",
                                         content_bytes=content,

@@ -45,9 +45,10 @@ export interface StorageStatus {
 }
 
 export interface BrowserSessionStatus {
-  status: 'not_connected' | 'connecting' | 'browser_open' | 'authenticated' | 'timeout' | 'error';
+  status: 'not_connected' | 'connecting' | 'browser_open' | 'authenticated' | 'not_authenticated' | 'timeout' | 'error';
   site: string | null;
   message: string;
+  debug_logs: string[];
 }
 
 export interface DeleteSlidesResponse {
@@ -108,6 +109,14 @@ export const api = {
     });
     if (!res.ok) {
       throw new Error('Failed to open browser session');
+    }
+    return res.json();
+  },
+
+  async verifyBrowserSession(): Promise<BrowserSessionStatus> {
+    const res = await fetch(`${API_BASE}/scrape/session/verify`, { method: 'POST' });
+    if (!res.ok) {
+      throw new Error('Failed to verify the open browser session');
     }
     return res.json();
   },

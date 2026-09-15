@@ -1,10 +1,11 @@
 """
 Playwright Browser Automation Driver for PowerPoint Scraping.
-Automates browser interaction, handles JavaScript execution, Google authentication persistence,
+Automates browser interaction, handles JavaScript execution, persists site login sessions,
 and intercepts .pptx file downloads directly from interactive web pages.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -14,7 +15,8 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
+from urllib.parse import urlparse
 from playwright.sync_api import sync_playwright, BrowserContext, Page, Download
 
 from app.config import settings
@@ -26,6 +28,26 @@ class BrowserDownloader:
         self.user_data_dir = user_data_dir or (settings.data_dir / "browser_profile")
         self.user_data_dir.mkdir(parents=True, exist_ok=True)
         self.headless = headless
+
+    def _session_cookie_file(self) -> Path:
+        return settings.data_dir / "browser_session_cookies.json"
+
+    def _read_persisted_cookie_header(self) -> str:
+        cookie_file = self._session_cookie_file()
+        if not cookie_file.exists():
+            return ""
+        try:
+            cookies = json.loads(cookie_file.read_text(encoding="utf-8"))
+            return "; ".join(f"{cookie['name']}={cookie['value']}" for cookie in cookies)
+        except (OSError, ValueError, TypeError, KeyError):
+            return ""
+
+    def _save_persisted_cookies(self, cookies: list[dict[str, object]]) -> None:
+        cookie_file = self._session_cookie_file()
+        cookie_file.write_text(json.dumps(cookies), encoding="utf-8")
+
+    def has_persisted_session(self) -> bool:
+        return bool(self._read_persisted_cookie_header())
 
     def get_session_cookie_header(self, retries: int = 5, retry_delay_sec: float = 1.0) -> str:
         """Reads the locally persisted browser session for internal scraper use only."""
@@ -41,7 +63,8 @@ class BrowserDownloader:
                     )
                     try:
                         cookies = context.cookies()
-                        return "; ".join(f"{cookie['name']}={cookie['value']}" for cookie in cookies)
+                        profile_header = "; ".join(f"{cookie['name']}={cookie['value']}" for cookie in cookies)
+                        return self._read_persisted_cookie_header() or profile_header
                     finally:
                         context.close()
             except Exception as error:
@@ -53,6 +76,57 @@ class BrowserDownloader:
             f"Could not open the saved Chrome profile after {retries} attempts: {last_error}"
         ) from last_error
 
+    def verify_authenticated_session(self, target_url: str, log: Callable[[str], None] | None = None) -> bool | None:
+        """Verifies authentication indicators on the actual target page in the saved profile."""
+        hostname = (urlparse(target_url).hostname or "").lower()
+        if hostname != "slidemodel.com" and not hostname.endswith(".slidemodel.com"):
+            if log:
+                log("[Browser Automation] Authentication verification is not available for this target domain.")
+            return None
+
+        with sync_playwright() as p:
+            context = p.chromium.launch_persistent_context(
+                channel="chrome",
+                user_data_dir=str(self.user_data_dir),
+                headless=True,
+                accept_downloads=True,
+            )
+            try:
+                page = context.new_page()
+                page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(2000)
+                login_visible = page.locator("a[href*='/account/login']").first.is_visible()
+                email_visible = page.locator("input[name='rcp_user_email']").first.is_visible()
+                is_authenticated = not login_visible
+                if log:
+                    log(f"[Browser Automation] Target-page authentication check at {page.url}: login_link_visible={login_visible}, free_download_email_visible={email_visible}, authenticated={is_authenticated}.")
+                return is_authenticated
+            finally:
+                context.close()
+
+    def verify_live_authenticated_session(self, target_url: str, log: Callable[[str], None] | None = None) -> bool:
+        """Checks authentication indicators on the actual target page in open Chrome."""
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp("http://127.0.0.1:9222")
+            pages = [page for context in browser.contexts for page in context.pages]
+            if not pages:
+                raise RuntimeError("No open page was found in the dedicated Chrome session")
+
+            page = pages[0]
+            page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(2000)
+            login_visible = page.locator("a[href*='/account/login']").first.is_visible()
+            email_visible = page.locator("input[name='rcp_user_email']").first.is_visible()
+            authenticated = not login_visible
+            if authenticated:
+                cookies = browser.contexts[0].cookies()
+                self._save_persisted_cookies(cookies)
+                if log:
+                    log(f"[Browser Automation] Captured {len(cookies)} live session cookies for server-side reuse; values hidden.")
+            if log:
+                log(f"[Browser Automation] Live auth check at {page.url}: login_link_visible={login_visible}, free_download_email_visible={email_visible}, authenticated={authenticated}.")
+            return authenticated
+
     def _profile_process_ids(self) -> list[int]:
         """Returns Chrome processes using this app-owned profile on Windows."""
         if os.name != "nt":
@@ -62,7 +136,7 @@ class BrowserDownloader:
         script = (
             "$profile = '" + profile_path + "'; "
             "$processes = Get-CimInstance Win32_Process -Filter \"Name = 'chrome.exe'\"; "
-            "$processes | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($profile) } "
+            "$processes | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($profile) -and -not $_.CommandLine.Contains('--type=') -and -not $_.CommandLine.Contains('--headless') } "
             "| Select-Object -ExpandProperty ProcessId"
         )
         result = subprocess.run(
@@ -102,6 +176,7 @@ class BrowserDownloader:
         self.close_browser_session()
         if self.user_data_dir.exists():
             shutil.rmtree(self.user_data_dir)
+        self._session_cookie_file().unlink(missing_ok=True)
         self.user_data_dir.mkdir(parents=True, exist_ok=True)
 
     def open_browser_login(
@@ -133,12 +208,14 @@ class BrowserDownloader:
             "--start-maximized",
             "--no-first-run",
             "--no-default-browser-check",
+            "--disable-background-mode",
+            "--remote-debugging-port=9222",
             url,
         ]
         _log("[Browser Automation] Launching the target page in a dedicated Chrome session...")
         browser_process = subprocess.Popen(command)
         _log(f"[Browser Automation] Target page opened in Chrome: {url}")
-        _log("[Browser Automation] Complete any site or Google authentication prompts manually.")
+        _log("[Browser Automation] Complete the target site's username and password login manually.")
 
         while browser_process.poll() is None:
             if stop_event and stop_event.wait(timeout=1):
@@ -152,7 +229,7 @@ class BrowserDownloader:
         self,
         url: str,
         log: Callable[[str], None] | None = None,
-        timeout_sec: int = 30,
+        timeout_sec: int = 20,
         session_cookies: dict[str, str] | None = None,
     ) -> tuple[str, bytes] | None:
         """
@@ -196,6 +273,7 @@ class BrowserDownloader:
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             )
             if session_cookies:
+                _log(f"[Browser Automation] Injecting {len(session_cookies)} saved cookie entries (values hidden).")
                 context.add_cookies([
                     {
                         "name": name,
@@ -216,10 +294,14 @@ class BrowserDownloader:
                 _log(f"[Browser Automation] Navigating to target page...")
                 page.goto(url, wait_until="domcontentloaded")
                 page.wait_for_timeout(2000)
+                _log(f"[Browser Automation] Page loaded at {page.url}.")
 
                 login_link = page.locator("a[href*='/account/login']").first
                 email_field = page.locator("input[name='rcp_user_email']").first
-                if login_link.is_visible() and email_field.is_visible():
+                login_visible = login_link.is_visible()
+                email_visible = email_field.is_visible()
+                _log(f"[Browser Automation] Auth indicators: login_link_visible={login_visible}, free_download_email_visible={email_visible}.")
+                if login_visible:
                     _log("[Browser Automation] The saved Chrome session is not authenticated to the target site.")
                     _log("[Browser Automation] Complete the target site's login in Chrome, then click Login complete before scraping.")
                     return None
@@ -258,11 +340,20 @@ class BrowserDownloader:
                     _log(f"[Browser Automation] No interactive download button found on page.")
                     return None
 
-                # 2. Trigger download and wait for download event
-                _log(f"[Browser Automation] Clicking download button and awaiting file stream...")
+                # 2. Trigger download and wait for download event or a PowerPoint response
+                ppt_responses: list[Any] = []
+
+                def capture_ppt_response(response):
+                    content_type = response.headers.get("content-type", "").lower()
+                    response_url = response.url.lower()
+                    if "presentation" in content_type or response_url.endswith((".pptx", ".ppt")):
+                        ppt_responses.append(response)
+
+                context.on("response", capture_ppt_response)
+                _log("[Browser Automation] Clicking download button and awaiting file stream...")
                 with tempfile.TemporaryDirectory() as tmp_dir:
                     try:
-                        with page.expect_download(timeout=20000) as download_info:
+                        with page.expect_download(timeout=timeout_sec * 1000) as download_info:
                             download_element.click()
 
                         download: Download = download_info.value
@@ -280,6 +371,16 @@ class BrowserDownloader:
                                 _log(f"[Browser Automation] Downloaded file is not a valid PowerPoint presentation ({len(content)} bytes).")
                     except Exception as click_err:
                         _log(f"[Browser Automation] Download wait event notice: {click_err}")
+                        for response in ppt_responses:
+                            try:
+                                content = response.body()
+                                is_ppt, fmt = is_powerpoint_content(content)
+                                if is_ppt:
+                                    filename = Path(urlparse(response.url).path).name or "presentation.pptx"
+                                    _log(f"[Browser Automation] Captured {fmt.upper()} response without a native download event: {filename} ({len(content) // 1024} KB)")
+                                    return filename, content
+                            except Exception as response_error:
+                                _log(f"[Browser Automation] Could not read PowerPoint response: {response_error}")
 
             finally:
                 context.close()

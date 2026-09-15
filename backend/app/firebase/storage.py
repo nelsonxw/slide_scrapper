@@ -19,6 +19,9 @@ from google.cloud.storage.blob import Blob
 from app.config import settings
 
 
+FIREBASE_UPLOAD_TIMEOUT_SECONDS = 60
+
+
 @dataclass
 class StoredSlideCard:
     id: str
@@ -135,6 +138,7 @@ class FirebaseStorageService:
             pptx_blob.upload_from_filename(
                 str(local_pptx),
                 content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                timeout=FIREBASE_UPLOAD_TIMEOUT_SECONDS,
             )
             try:
                 pptx_blob.make_public()
@@ -144,7 +148,11 @@ class FirebaseStorageService:
             # Upload Preview PNG blob
             preview_blob = self.bucket.blob(storage_preview_path)
             preview_blob.metadata = metadata
-            preview_blob.upload_from_filename(str(local_preview), content_type="image/png")
+            preview_blob.upload_from_filename(
+                str(local_preview),
+                content_type="image/png",
+                timeout=FIREBASE_UPLOAD_TIMEOUT_SECONDS,
+            )
             try:
                 preview_blob.make_public()
             except Exception:
