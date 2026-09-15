@@ -27,25 +27,79 @@ class BrowserDownloader:
         self.user_data_dir.mkdir(parents=True, exist_ok=True)
         self.headless = headless
 
-    def get_session_cookie_header(self) -> str:
+    def get_session_cookie_header(self, retries: int = 5, retry_delay_sec: float = 1.0) -> str:
         """Reads the locally persisted browser session for internal scraper use only."""
-        with sync_playwright() as p:
-            context = p.chromium.launch_persistent_context(
-                channel="chrome",
-                user_data_dir=str(self.user_data_dir),
-                headless=True,
-                accept_downloads=True,
-            )
+        last_error: Exception | None = None
+        for attempt in range(retries):
             try:
-                cookies = context.cookies()
-                return "; ".join(f"{cookie['name']}={cookie['value']}" for cookie in cookies)
-            finally:
-                context.close()
+                with sync_playwright() as p:
+                    context = p.chromium.launch_persistent_context(
+                        channel="chrome",
+                        user_data_dir=str(self.user_data_dir),
+                        headless=True,
+                        accept_downloads=True,
+                    )
+                    try:
+                        cookies = context.cookies()
+                        return "; ".join(f"{cookie['name']}={cookie['value']}" for cookie in cookies)
+                    finally:
+                        context.close()
+            except Exception as error:
+                last_error = error
+                if attempt < retries - 1:
+                    time.sleep(retry_delay_sec)
+
+        raise RuntimeError(
+            f"Could not open the saved Chrome profile after {retries} attempts: {last_error}"
+        ) from last_error
+
+    def _profile_process_ids(self) -> list[int]:
+        """Returns Chrome processes using this app-owned profile on Windows."""
+        if os.name != "nt":
+            return []
+
+        profile_path = str(self.user_data_dir.resolve()).replace("'", "''")
+        script = (
+            "$profile = '" + profile_path + "'; "
+            "$processes = Get-CimInstance Win32_Process -Filter \"Name = 'chrome.exe'\"; "
+            "$processes | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($profile) } "
+            "| Select-Object -ExpandProperty ProcessId"
+        )
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        process_ids = []
+        for line in result.stdout.splitlines():
+            try:
+                process_ids.append(int(line.strip()))
+            except ValueError:
+                continue
+        return process_ids
+
+    def is_browser_open(self) -> bool:
+        """Returns whether the dedicated app-owned Chrome profile is currently open."""
+        return bool(self._profile_process_ids())
+
+    def close_browser_session(self) -> None:
+        """Closes only Chrome processes belonging to this app-owned profile."""
+        for process_id in self._profile_process_ids():
+            subprocess.run(
+                ["taskkill", "/PID", str(process_id), "/T", "/F"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        for _ in range(20):
+            if not self.is_browser_open():
+                break
+            time.sleep(0.25)
 
     def clear_session(self) -> None:
         """Removes the persisted browser profile after the user requests sign-out."""
-        import shutil
-
+        self.close_browser_session()
         if self.user_data_dir.exists():
             shutil.rmtree(self.user_data_dir)
         self.user_data_dir.mkdir(parents=True, exist_ok=True)
@@ -99,6 +153,7 @@ class BrowserDownloader:
         url: str,
         log: Callable[[str], None] | None = None,
         timeout_sec: int = 30,
+        session_cookies: dict[str, str] | None = None,
     ) -> tuple[str, bytes] | None:
         """
         Visits the page in a persistent Chromium session, finds and clicks the download button/form,
@@ -113,32 +168,43 @@ class BrowserDownloader:
 
         with sync_playwright() as p:
             launch_kwargs = {
-                "user_data_dir": str(self.user_data_dir),
                 "headless": self.headless,
-                "accept_downloads": True,
-                "viewport": {"width": 1280, "height": 800},
-                "ignore_default_args": ["--enable-automation"],
                 "args": [
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
                     "--disable-infobars",
                 ],
-                "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             }
 
-            context: BrowserContext = None
+            browser = None
             for ch in ["chrome", "msedge", None]:
                 try:
                     kwargs = dict(launch_kwargs)
                     if ch:
                         kwargs["channel"] = ch
-                    context = p.chromium.launch_persistent_context(**kwargs)
+                    browser = p.chromium.launch(**kwargs)
                     break
                 except Exception:
                     continue
 
-            if not context:
-                context = p.chromium.launch_persistent_context(**launch_kwargs)
+            if not browser:
+                browser = p.chromium.launch(**launch_kwargs)
+
+            context = browser.new_context(
+                viewport={"width": 1280, "height": 800},
+                accept_downloads=True,
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            )
+            if session_cookies:
+                context.add_cookies([
+                    {
+                        "name": name,
+                        "value": value,
+                        "domain": ".slidemodel.com",
+                        "path": "/",
+                    }
+                    for name, value in session_cookies.items()
+                ])
 
             # Evade navigator.webdriver detection
             context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
@@ -217,5 +283,6 @@ class BrowserDownloader:
 
             finally:
                 context.close()
+                browser.close()
 
         return None

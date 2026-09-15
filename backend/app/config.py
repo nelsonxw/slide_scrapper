@@ -54,7 +54,7 @@ class Settings(BaseModel):
     def ensure_directories(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         (self.data_dir / "temp_downloads").mkdir(parents=True, exist_ok=True)
-        (self.data_dir / "split_slides").mkdir(parents=True, exist_ok=True)
+        (self.data_dir / "slides").mkdir(parents=True, exist_ok=True)
         (self.data_dir / "previews").mkdir(parents=True, exist_ok=True)
 
 

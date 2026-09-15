@@ -44,6 +44,7 @@ class SiteScraper:
         self.max_crawl_pages = max_crawl_pages
         self.max_depth = max_depth
         self.use_browser = use_browser
+        self._browser_processed_pages: set[str] = set()
         self.headers = {
             "User-Agent": user_agent
             or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -162,6 +163,7 @@ class SiteScraper:
         discovered_items: list[DiscoveredPowerPoint] = []
         visited_pages: set[str] = set()
         seen_download_urls: set[str] = set()
+        self._browser_processed_pages.clear()
 
         queue: collections.deque[tuple[str, int]] = collections.deque([(self.target_url, 0)])
 
@@ -372,20 +374,43 @@ class SiteScraper:
 
                     # Check if the page is an account login/signup gate or interactive download form
                     page_text = resp.text.lower()
+                    interactive_download_form = sub_soup.find(
+                        "form",
+                        action=re.compile(r"/download(?:/|\?)", re.IGNORECASE),
+                    )
                     is_gated_form = (
                         any(g in str(resp.url).lower() for g in ["/signup", "/login", "/register", "/plans"])
+                        or (
+                            "/download" in urlparse(url).path.lower()
+                            and urlparse(source_page_url).path.lower() != urlparse(url).path.lower()
+                        )
                         or "create free account" in page_text
                         or "rcp_user_pass" in page_text
                         or "complete the form" in page_text
+                        or bool(
+                            interactive_download_form
+                            and (
+                                interactive_download_form.get("method", "get").lower() == "post"
+                                or interactive_download_form.find("input", attrs={"name": "magn-ddaid"})
+                                or interactive_download_form.find("input", attrs={"name": "magn-ddid"})
+                            )
+                        )
                     )
 
                     if is_gated_form:
                         log(f"Detected interactive download form on {source_page_url}.")
                         if self.use_browser:
+                            if source_page_url in self._browser_processed_pages:
+                                return None
+                            self._browser_processed_pages.add(source_page_url)
                             log(f"Launching automated browser session to intercept file download...")
                             try:
                                 b_driver = BrowserDownloader()
-                                res = b_driver.download_powerpoint_from_page(source_page_url, log=log)
+                                res = b_driver.download_powerpoint_from_page(
+                                    source_page_url,
+                                    log=log,
+                                    session_cookies=self.cookies,
+                                )
                                 if res:
                                     name, content = res
                                     return DiscoveredPowerPoint(

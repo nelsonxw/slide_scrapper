@@ -40,7 +40,7 @@ export const BrowserSessionAuth: React.FC<BrowserSessionAuthProps> = ({ targetUr
     const loginUrl = targetUrl.trim() || 'https://www.slidemodel.com/account/login/';
     setIsLoading(true);
     setError(null);
-    setSession({ status: 'connecting', site: loginUrl, message: 'Complete login in the visible browser window, then close it.' });
+    setSession({ status: 'connecting', site: loginUrl, message: 'Complete login in the visible browser window, then click Login complete.' });
 
     try {
       const result = await api.openBrowserLogin(loginUrl);
@@ -97,7 +97,7 @@ export const BrowserSessionAuth: React.FC<BrowserSessionAuthProps> = ({ targetUr
         <div>
           <strong style={{ display: 'block', fontSize: '13px', color: 'var(--slate-800)' }}>Protected-site session</strong>
           <span style={{ fontSize: '11px', color: 'var(--slate-500)' }}>
-            The exact target page opens in one persistent Chrome session. Complete any Google or site sign-in prompt there.
+            The exact target page opens in a dedicated Chrome session. Complete any Google or site sign-in prompt there, then click Login complete so the profile is unlocked for scraping.
           </span>
         </div>
         <span

@@ -86,12 +86,56 @@ def get_storage_status():
     return storage.get_status()
 
 
+def _download_firebase_object(
+    storage_path: str,
+    media_type: str,
+    filename: str,
+    as_attachment: bool = True,
+) -> Response:
+    if not storage_path.startswith(("slides/", "previews/")) or ".." in storage_path:
+        raise HTTPException(status_code=400, detail="Invalid storage path")
+
+    storage_service = FirebaseStorageService.get_instance()
+    if not storage_service.is_connected or not storage_service.bucket:
+        raise HTTPException(status_code=503, detail="Firebase Storage is not connected")
+
+    try:
+        blob = storage_service.bucket.blob(storage_path)
+        if not blob.exists():
+            raise HTTPException(status_code=404, detail="Storage object not found")
+        content = blob.download_as_bytes()
+        headers = {"Content-Disposition": f'attachment; filename="{filename}"'} if as_attachment else {}
+        return Response(content=content, media_type=media_type, headers=headers)
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=f"Could not read Firebase Storage object: {error}") from error
+
+
+@router.get("/download/storage/{storage_path:path}")
+def download_firebase_slide(storage_path: str):
+    """Streams a PPTX from Firebase using the server-side Admin SDK credentials."""
+    filename = storage_path.rsplit("/", 1)[-1]
+    return _download_firebase_object(
+        storage_path,
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        filename,
+    )
+
+
+@router.get("/preview/storage/{storage_path:path}")
+def preview_firebase_slide(storage_path: str):
+    """Streams a preview image from Firebase using the server-side Admin SDK credentials."""
+    filename = storage_path.rsplit("/", 1)[-1]
+    return _download_firebase_object(storage_path, "image/png", filename, as_attachment=False)
+
+
 @router.get("/download/local/{filename}")
 def download_local_slide(filename: str):
     """
     Serves local PPTX file when running in local fallback mode.
     """
-    file_path = settings.data_dir / "split_slides" / filename
+    file_path = settings.data_dir / "slides" / filename
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Slide file not found")
     return FileResponse(

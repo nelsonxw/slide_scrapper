@@ -8,7 +8,6 @@ from __future__ import annotations
 import datetime
 import json
 import os
-import urllib.parse
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -264,7 +263,7 @@ class FirebaseStorageService:
                         pass
 
                 # Delete local files if they exist
-                local_pptx = settings.data_dir / "split_slides" / card.slide_filename
+                local_pptx = settings.data_dir / "slides" / card.slide_filename
                 if local_pptx.exists():
                     local_pptx.unlink(missing_ok=True)
                 local_preview = settings.data_dir / "previews" / card.preview_filename
@@ -298,16 +297,11 @@ class FirebaseStorageService:
             "errors": errors,
         }
 
-    def _get_blob_url(self, blob: Blob, path: str) -> str:
-        """
-        Generates public or signed URL for a Firebase Storage blob.
-        """
-        try:
-            # Firebase standard download URL format
-            encoded_path = urllib.parse.quote(path, safe="")
-            return f"https://firebasestorage.googleapis.com/v0/b/{self.bucket_name}/o/{encoded_path}?alt=media"
-        except Exception:
-            return f"/api/slides/download/storage/{urllib.parse.quote(path)}"
+    def _get_blob_url(self, blob: Blob | None, path: str) -> str:
+        """Returns an authenticated backend URL for a stored Firebase object."""
+        if path.startswith("previews/"):
+            return f"/api/slides/preview/storage/{path}"
+        return f"/api/slides/download/storage/{path}"
 
     def _get_index_file(self) -> Path:
         return settings.data_dir / "slides_index.json"
@@ -317,8 +311,12 @@ class FirebaseStorageService:
         if not idx_file.exists():
             return []
         try:
-            data = json.loads(idx_file.read_text(encoding="utf-8"))
-            return [StoredSlideCard(**item) for item in data]
+            cards = [StoredSlideCard(**item) for item in json.loads(idx_file.read_text(encoding="utf-8"))]
+            if self.is_connected:
+                for card in cards:
+                    card.pptx_url = self._get_blob_url(None, card.storage_pptx_path)
+                    card.preview_url = self._get_blob_url(None, card.storage_preview_path)
+            return cards
         except Exception:
             return []
 

@@ -269,6 +269,20 @@ login_stop_event: threading.Event | None = None
 @router.get("/session")
 def get_browser_session_status():
     """Returns browser-session status without exposing credentials or cookies."""
+    from app.scraper.browser_driver import BrowserDownloader
+
+    browser = BrowserDownloader()
+    browser_open = browser.is_browser_open()
+    if browser_open:
+        session_state.update({
+            "status": "browser_open",
+            "message": "Chrome is open. Complete login, then click Login complete.",
+        })
+    elif session_state["status"] == "browser_open":
+        session_state.update({
+            "status": "authenticated",
+            "message": "Browser session saved locally.",
+        })
     return session_state
 
 
@@ -309,10 +323,15 @@ def open_browser_login(req: OpenBrowserLoginRequest):
 
 @router.post("/session/complete")
 def complete_browser_session():
-    """Marks login complete while leaving Chrome open for a graceful user close."""
+    """Stops the dedicated Chrome process so its profile can be read by the scraper."""
+    if login_stop_event:
+        login_stop_event.set()
+    from app.scraper.browser_driver import BrowserDownloader
+
+    BrowserDownloader(headless=False).close_browser_session()
     session_state.update({
         "status": "authenticated",
-        "message": "Login marked complete. Close the Chrome window normally to persist the session.",
+        "message": "Login complete. Chrome is closed and the saved session is ready for scraping.",
     })
     return session_state
 
