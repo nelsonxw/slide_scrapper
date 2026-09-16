@@ -1,6 +1,7 @@
 """Tests for generic target-site crawling and download control detection."""
 import unittest
 
+import httpx
 from bs4 import BeautifulSoup
 
 from app.scraper.crawler import SiteScraper
@@ -32,6 +33,36 @@ class TestCrawlerDetection(unittest.TestCase):
     def test_does_not_apply_site_specific_url_rules(self):
         tag = BeautifulSoup('<a href="https://docs.google.com/download?id=123">Download</a>', "html.parser").a
         self.assertTrue(self.scraper._is_download_element(tag, tag["href"]))
+
+    def test_detects_download_form_message_in_hidden_input(self):
+        tag = BeautifulSoup(
+            '<form action="/account/signup/">'
+            '<input type="hidden" value="Please complete the form in order to download">'
+            '<input type="email">'
+            '<input type="submit" value="Continue">'
+            '</form>',
+            "html.parser",
+        ).form
+        self.assertTrue(self.scraper._is_download_element(tag, tag["action"]))
+
+    def test_preserves_structured_cookie_metadata_for_httpx(self):
+        scraper = SiteScraper(
+            "https://example.com/catalog",
+            cookies=[
+                {
+                    "name": "session",
+                    "value": "authenticated",
+                    "domain": ".example.com",
+                    "path": "/",
+                }
+            ],
+            use_browser=False,
+        )
+        with httpx.Client() as client:
+            scraper._configure_client_cookies(client)
+            request = client.build_request("GET", "https://example.com/catalog")
+
+        self.assertIn("session=authenticated", request.headers["Cookie"])
 
 
 if __name__ == "__main__":

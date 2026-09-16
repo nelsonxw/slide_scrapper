@@ -89,13 +89,12 @@ def _run_scrape_pipeline(
         from app.scraper.browser_driver import BrowserDownloader
 
         try:
-            session_cookies = BrowserDownloader().get_session_cookie_header(target_url=target_url)
+            session_cookies = BrowserDownloader().get_session_cookies(target_url=target_url)
         except Exception as session_error:
-            session_cookies = ""
+            session_cookies = []
             log(f"Saved browser session is unavailable; continuing without it: {session_error}")
         if session_cookies:
-            cookie_count = len([entry for entry in session_cookies.split(";") if "=" in entry])
-            log(f"Using the locally saved browser session for authenticated requests ({cookie_count} cookie entries loaded; values hidden).")
+            log(f"Using the locally saved browser session for authenticated requests ({len(session_cookies)} cookie entries loaded; values hidden).")
         task["current_step"] = "Crawling site & searching for download buttons..."
 
         scraper = SiteScraper(

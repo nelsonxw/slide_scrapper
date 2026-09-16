@@ -16,6 +16,9 @@ from app.scraper.detector import is_powerpoint_content, is_powerpoint_url_or_hea
 from app.scraper.browser_driver import BrowserDownloader
 
 
+Cookie = dict[str, object]
+
+
 @dataclass
 class DiscoveredPowerPoint:
     title: str
@@ -33,7 +36,7 @@ class SiteScraper:
         max_crawl_pages: int = 30,
         max_depth: int = 3,
         user_agent: str | None = None,
-        cookies: str | dict[str, str] | None = None,
+        cookies: str | dict[str, str] | list[Cookie] | None = None,
         custom_headers: dict[str, str] | None = None,
         use_browser: bool = True,
     ):
@@ -54,16 +57,44 @@ class SiteScraper:
         if custom_headers:
             self.headers.update(custom_headers)
 
-        self.cookies: dict[str, str] = {}
-        if isinstance(cookies, str) and cookies.strip():
-            clean_cookie_str = cookies.replace("Cookie:", "").replace("cookie:", "").strip()
-            for item in re.split(r"[;\n\r]+", clean_cookie_str):
-                if "=" in item:
-                    k, v = item.strip().split("=", 1)
-                    if k.strip():
-                        self.cookies[k.strip()] = v.strip()
-        elif isinstance(cookies, dict):
-            self.cookies = cookies
+        self.cookies: list[Cookie] = self._normalize_cookies(cookies)
+
+    def _normalize_cookies(
+        self,
+        cookies: str | dict[str, str] | list[Cookie] | None,
+    ) -> list[Cookie]:
+        if isinstance(cookies, list):
+            return [dict(cookie) for cookie in cookies]
+
+        if isinstance(cookies, dict):
+            return [{"name": name, "value": value, "path": "/"} for name, value in cookies.items()]
+
+        if not isinstance(cookies, str) or not cookies.strip():
+            return []
+
+        normalized: list[Cookie] = []
+        clean_cookie_str = cookies.replace("Cookie:", "").replace("cookie:", "").strip()
+        for item in re.split(r"[;\n\r]+", clean_cookie_str):
+            if "=" not in item:
+                continue
+            name, value = item.strip().split("=", 1)
+            if name.strip():
+                normalized.append({"name": name.strip(), "value": value.strip(), "path": "/"})
+        return normalized
+
+    def _configure_client_cookies(self, client: httpx.Client) -> None:
+        """Adds Chrome cookies to an httpx client without logging their values."""
+        for cookie in self.cookies:
+            name = str(cookie.get("name", ""))
+            value = str(cookie.get("value", ""))
+            if not name:
+                continue
+
+            cookie_kwargs = {"path": str(cookie.get("path", "/"))}
+            domain = str(cookie.get("domain", ""))
+            if domain:
+                cookie_kwargs["domain"] = domain
+            client.cookies.set(name, value, **cookie_kwargs)
 
     def _is_download_element(self, tag: BeautifulSoup, href_or_action: str) -> bool:
         """
@@ -92,7 +123,12 @@ class SiteScraper:
         classes = " ".join(tag.get("class", [])).lower() if tag.get("class") else ""
         elem_id = tag.get("id", "").lower()
         tag_value = tag.get("value", "").lower() if tag.has_attr("value") else ""
-        all_text = f"{text} {title_attr} {aria_label} {classes} {elem_id} {tag_value}"
+        descendant_values = " ".join(
+            str(control.get("value", ""))
+            for control in tag.find_all(["input", "button"])
+            if control.has_attr("value")
+        ).lower()
+        all_text = f"{text} {title_attr} {aria_label} {classes} {elem_id} {tag_value} {descendant_values}"
 
         # Check for explicit PowerPoint download action keywords
         download_action_keywords = [
@@ -156,11 +192,11 @@ class SiteScraper:
 
         with httpx.Client(
             headers=self.headers,
-            cookies=self.cookies,
             timeout=20.0,
             follow_redirects=True,
             verify=False,
         ) as client:
+            self._configure_client_cookies(client)
             while queue and len(visited_pages) < self.max_crawl_pages:
                 if should_stop and should_stop():
                     log("Crawling stopped by user.")
@@ -183,6 +219,18 @@ class SiteScraper:
                 if resp.status_code != 200:
                     log(f"HTTP {resp.status_code} on {current_url}")
                     continue
+
+                if len(visited_pages) == 1:
+                    response_text = resp.text.lower()
+                    has_account_marker = "logout" in response_text or "my account" in response_text
+                    has_signup_marker = "complete the form in order to download" in response_text
+                    log(
+                        "Authenticated request check: "
+                        f"HTTP {resp.status_code}, final_url={resp.url}, "
+                        f"cookies_applied={len(self.cookies)}, "
+                        f"account_marker={has_account_marker}, "
+                        f"signup_marker={has_signup_marker}"
+                    )
 
                 content_type = resp.headers.get("content-type", "").lower()
 
@@ -291,7 +339,8 @@ class SiteScraper:
         try:
             if client:
                 return client.get(url, headers=self.headers, timeout=20.0, follow_redirects=True)
-            with httpx.Client(headers=self.headers, cookies=self.cookies, timeout=20.0, follow_redirects=True, verify=False) as temp_client:
+            with httpx.Client(headers=self.headers, timeout=20.0, follow_redirects=True, verify=False) as temp_client:
+                self._configure_client_cookies(temp_client)
                 return temp_client.get(url)
         except Exception:
             return None
@@ -352,6 +401,10 @@ class SiteScraper:
                         "form",
                         action=re.compile(r"/download(?:/|\?)", re.IGNORECASE),
                     )
+                    signup_download_form = sub_soup.find(
+                        "form",
+                        action=re.compile(r"/account/signup(?:/|\?)", re.IGNORECASE),
+                    )
                     has_password_field = bool(sub_soup.select("input[type='password']"))
                     gate_phrases = (
                         "login to download",
@@ -365,6 +418,11 @@ class SiteScraper:
                         "membership required",
                     )
                     is_auth_gate = has_password_field or any(phrase in page_text for phrase in gate_phrases)
+                    is_signup_download_form = bool(
+                        signup_download_form
+                        and signup_download_form.find("input", attrs={"type": "email"})
+                        and "download" in page_text
+                    )
                     is_interactive_download = (
                         "/download" in urlparse(url).path.lower()
                         and urlparse(source_page_url).path.lower() != urlparse(url).path.lower()
@@ -375,7 +433,7 @@ class SiteScraper:
                             or interactive_download_form.find("input", attrs={"name": "magn-ddaid"})
                             or interactive_download_form.find("input", attrs={"name": "magn-ddid"})
                         )
-                    )
+                    ) or is_signup_download_form
 
                     if is_auth_gate:
                         log(f"Skipping gated download page for {url}; login, subscription, or upgrade is required.")

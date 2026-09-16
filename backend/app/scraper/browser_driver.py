@@ -49,29 +49,16 @@ class BrowserDownloader:
     def has_persisted_session(self) -> bool:
         return bool(self._read_persisted_cookie_header())
 
-    def get_session_cookie_header(
+    def get_session_cookies(
         self,
         target_url: str | None = None,
         retries: int = 5,
         retry_delay_sec: float = 1.0,
-    ) -> str:
-        """Reads the locally persisted browser session for the requested target host."""
+    ) -> list[dict[str, object]]:
+        """Reads target-host cookies from the persisted Chrome session."""
         target_host = (urlparse(target_url).hostname or "").lower() if target_url else None
-
-        def format_cookies(cookies: list[dict[str, object]]) -> str:
-            selected: dict[str, tuple[int, str]] = {}
-            for cookie in cookies:
-                name = str(cookie.get("name", ""))
-                value = str(cookie.get("value", ""))
-                domain = str(cookie.get("domain", "")).lower().lstrip(".")
-                if not name or (target_host and not (target_host == domain or target_host.endswith(f".{domain}"))):
-                    continue
-                priority = 2 if target_host == domain else 1
-                if name not in selected or priority > selected[name][0]:
-                    selected[name] = (priority, value)
-            return "; ".join(f"{name}={value}" for name, (_, value) in selected.items())
-
         last_error: Exception | None = None
+
         for attempt in range(retries):
             try:
                 with sync_playwright() as p:
@@ -82,15 +69,15 @@ class BrowserDownloader:
                         accept_downloads=True,
                     )
                     try:
-                        cookies = context.cookies()
                         try:
                             persisted = json.loads(self._session_cookie_file().read_text(encoding="utf-8"))
                         except (OSError, ValueError, TypeError):
                             persisted = []
-                        combined_header = format_cookies(persisted + cookies)
-                        if combined_header:
-                            return combined_header
-                        return ""
+
+                        persisted_cookies = self._filter_session_cookies(persisted, target_host)
+                        if persisted_cookies:
+                            return persisted_cookies
+                        return self._filter_session_cookies(context.cookies(), target_host)
                     finally:
                         context.close()
             except Exception as error:
@@ -101,6 +88,42 @@ class BrowserDownloader:
         raise RuntimeError(
             f"Could not open the saved Chrome profile after {retries} attempts: {last_error}"
         ) from last_error
+
+    def get_session_cookie_header(
+        self,
+        target_url: str | None = None,
+        retries: int = 5,
+        retry_delay_sec: float = 1.0,
+    ) -> str:
+        """Returns a compatibility Cookie header for the target host."""
+        cookies = self.get_session_cookies(target_url, retries, retry_delay_sec)
+        return "; ".join(
+            f"{cookie['name']}={cookie['value']}"
+            for cookie in cookies
+            if cookie.get("name")
+        )
+
+    def _filter_session_cookies(
+        self,
+        cookies: list[dict[str, object]],
+        target_host: str | None,
+    ) -> list[dict[str, object]]:
+        """Keeps valid target-host cookies while preserving browser metadata."""
+        selected: dict[tuple[str, str, str], dict[str, object]] = {}
+        for cookie in cookies:
+            name = str(cookie.get("name", ""))
+            domain = str(cookie.get("domain", "")).lower().lstrip(".")
+            path = str(cookie.get("path", "/"))
+            if not name or (
+                target_host
+                and domain
+                and target_host != domain
+                and not target_host.endswith(f".{domain}")
+            ):
+                continue
+            key = (name, domain, path)
+            selected[key] = cookie
+        return list(selected.values())
 
     def _page_requires_authentication(self, page: Page) -> bool:
         """Detects generic login, subscription, and upgrade gates without site-specific rules."""
@@ -267,12 +290,52 @@ class BrowserDownloader:
 
         _log("[Browser Automation] Chrome session closed. Browser session saved locally.")
 
+    def _prepare_context_cookies(
+        self,
+        session_cookies: list[dict[str, object]] | dict[str, str],
+        target_domain: str,
+    ) -> list[dict[str, object]]:
+        """Converts saved Chrome cookies into Playwright context cookies."""
+        if isinstance(session_cookies, dict):
+            return [
+                {
+                    "name": name,
+                    "value": value,
+                    "domain": target_domain,
+                    "path": "/",
+                }
+                for name, value in session_cookies.items()
+            ]
+
+        target_domain = target_domain.lower().lstrip(".")
+        prepared: list[dict[str, object]] = []
+        for cookie in session_cookies:
+            domain = str(cookie.get("domain", "")).lower().lstrip(".")
+            if domain and target_domain != domain and not target_domain.endswith(f".{domain}"):
+                continue
+
+            name = str(cookie.get("name", ""))
+            if not name:
+                continue
+
+            prepared_cookie: dict[str, object] = {
+                "name": name,
+                "value": str(cookie.get("value", "")),
+                "domain": domain or target_domain,
+                "path": str(cookie.get("path", "/")),
+            }
+            for key in ("expires", "httpOnly", "secure", "sameSite"):
+                if key in cookie and cookie[key] is not None:
+                    prepared_cookie[key] = cookie[key]
+            prepared.append(prepared_cookie)
+        return prepared
+
     def download_powerpoint_from_page(
         self,
         url: str,
         log: Callable[[str], None] | None = None,
         timeout_sec: int = 20,
-        session_cookies: dict[str, str] | None = None,
+        session_cookies: list[dict[str, object]] | dict[str, str] | None = None,
         session_cookie_domain: str | None = None,
     ) -> tuple[str, bytes] | None:
         """
@@ -317,16 +380,13 @@ class BrowserDownloader:
             )
             cookie_domain = session_cookie_domain or urlparse(url).hostname
             if session_cookies and cookie_domain:
-                _log(f"[Browser Automation] Injecting {len(session_cookies)} saved cookie entries for {cookie_domain} (values hidden).")
-                context.add_cookies([
-                    {
-                        "name": name,
-                        "value": value,
-                        "domain": cookie_domain,
-                        "path": "/",
-                    }
-                    for name, value in session_cookies.items()
-                ])
+                cookies = self._prepare_context_cookies(
+                    session_cookies,
+                    cookie_domain,
+                )
+                _log(f"[Browser Automation] Injecting {len(cookies)} saved cookie entries for {cookie_domain} (values hidden).")
+                if cookies:
+                    context.add_cookies(cookies)
 
             # Evade navigator.webdriver detection
             context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
