@@ -16,7 +16,7 @@ const PRESET_URLS = [
 
 export const ScrapeForm: React.FC<ScrapeFormProps> = ({ onScrapeComplete, onNavigateToGallery }) => {
   const [url, setUrl] = useState('');
-  const [maxPages, setMaxPages] = useState(20);
+  const [maxPages, setMaxPages] = useState(50);
   const [maxDepth, setMaxDepth] = useState(2);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [activeTask, setActiveTask] = useState<ScrapeTaskStatus | null>(null);
@@ -264,8 +264,9 @@ export const ScrapeForm: React.FC<ScrapeFormProps> = ({ onScrapeComplete, onNavi
               </div>
               <input
                 type="range"
-                min={1}
-                max={50}
+                min={50}
+                max={1000}
+                step={50}
                 value={maxPages}
                 onChange={(e) => setMaxPages(Number(e.target.value))}
                 disabled={Boolean(isRunning)}

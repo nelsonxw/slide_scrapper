@@ -23,7 +23,7 @@ router = APIRouter(prefix="/api/scrape", tags=["Scraper"])
 
 class StartScrapeRequest(BaseModel):
     url: str = Field(..., description="Target website URL to scrape")
-    max_pages: int = Field(default=25, ge=1, le=100, description="Max sub-pages to crawl")
+    max_pages: int = Field(default=25, ge=1, le=1000, description="Max sub-pages to crawl")
     max_depth: int = Field(default=2, ge=0, le=5, description="Max crawl depth (0 = target page only)")
 
 
@@ -45,6 +45,22 @@ class ScrapeTaskStatus(BaseModel):
 # In-memory registry of tasks
 tasks: dict[str, dict[str, Any]] = {}
 active_threads: dict[str, threading.Event] = {}
+scrape_history_lock = threading.Lock()
+scrape_history: set[str] = set()
+
+
+def _normalize_scrape_url(url: str) -> str:
+    return url.strip().split("#", 1)[0].rstrip("/").lower()
+
+
+def _mark_scrape_history(url: str) -> None:
+    with scrape_history_lock:
+        scrape_history.add(_normalize_scrape_url(url))
+
+
+def _was_scraped(url: str) -> bool:
+    with scrape_history_lock:
+        return _normalize_scrape_url(url) in scrape_history
 
 
 def _run_scrape_pipeline(
@@ -73,7 +89,7 @@ def _run_scrape_pipeline(
         from app.scraper.browser_driver import BrowserDownloader
 
         try:
-            session_cookies = BrowserDownloader().get_session_cookie_header()
+            session_cookies = BrowserDownloader().get_session_cookie_header(target_url=target_url)
         except Exception as session_error:
             session_cookies = ""
             log(f"Saved browser session is unavailable; continuing without it: {session_error}")
@@ -109,6 +125,7 @@ def _run_scrape_pipeline(
             return
 
         if not discovered_ppts:
+            _mark_scrape_history(target_url)
             task["status"] = "completed"
             task["current_step"] = "Finished: No PowerPoint files found."
             log("No PowerPoint download buttons or files discovered on the target site.")
@@ -181,6 +198,7 @@ def _run_scrape_pipeline(
             task["current_step"] = "Task cancelled by user."
             log("Task cancelled during slide processing.")
         else:
+            _mark_scrape_history(target_url)
             task["status"] = "completed"
             task["current_step"] = f"Completed successfully! {uploaded_slides} slides saved to Firebase Storage."
             log(f"All processing complete! Saved {uploaded_slides} individual slide files to Firebase Storage.")
@@ -201,7 +219,29 @@ def start_scrape_task(request: StartScrapeRequest):
     if not request.url or not request.url.strip():
         raise HTTPException(status_code=400, detail="Target URL cannot be empty")
 
+    target_url = request.url.strip()
     task_id = str(uuid.uuid4())
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    if _was_scraped(target_url):
+        task_record = {
+            "task_id": task_id,
+            "target_url": target_url,
+            "status": "completed",
+            "current_step": "Skipped: this target was already scraped.",
+            "discovered_files_count": 0,
+            "total_slides_created": 0,
+            "uploaded_slides_count": 0,
+            "logs": [
+                f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Skipped previously scraped target: {target_url}"
+            ],
+            "created_at": now,
+            "updated_at": now,
+            "error": None,
+            "saved_slides": [],
+        }
+        tasks[task_id] = task_record
+        return ScrapeTaskStatus(**task_record)
     stop_event = threading.Event()
     active_threads[task_id] = stop_event
 

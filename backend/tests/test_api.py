@@ -1,5 +1,6 @@
 """Test FastAPI endpoints."""
 import unittest
+from unittest.mock import patch
 from fastapi.testclient import TestClient
 from app.main import app
 
@@ -32,6 +33,13 @@ class TestAPI(unittest.TestCase):
         del_res = self.client.request("DELETE", "/api/slides", json={"slide_ids": []})
         self.assertEqual(del_res.status_code, 200)
         self.assertEqual(del_res.json()["deleted_count"], 0)
+
+    def test_previously_scraped_target_is_skipped(self):
+        with patch("app.routes.scrape._was_scraped", return_value=True):
+            res = self.client.post("/api/scrape/start", json={"url": "https://example.com/already-scraped"})
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(res.json()["status"], "completed")
+        self.assertIn("already scraped", res.json()["current_step"])
 
     def test_scrape_start_and_status(self):
         res = self.client.post("/api/scrape/start", json={"url": "https://example.com/test", "max_pages": 1, "max_depth": 1})

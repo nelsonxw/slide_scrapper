@@ -49,8 +49,28 @@ class BrowserDownloader:
     def has_persisted_session(self) -> bool:
         return bool(self._read_persisted_cookie_header())
 
-    def get_session_cookie_header(self, retries: int = 5, retry_delay_sec: float = 1.0) -> str:
-        """Reads the locally persisted browser session for internal scraper use only."""
+    def get_session_cookie_header(
+        self,
+        target_url: str | None = None,
+        retries: int = 5,
+        retry_delay_sec: float = 1.0,
+    ) -> str:
+        """Reads the locally persisted browser session for the requested target host."""
+        target_host = (urlparse(target_url).hostname or "").lower() if target_url else None
+
+        def format_cookies(cookies: list[dict[str, object]]) -> str:
+            selected: dict[str, tuple[int, str]] = {}
+            for cookie in cookies:
+                name = str(cookie.get("name", ""))
+                value = str(cookie.get("value", ""))
+                domain = str(cookie.get("domain", "")).lower().lstrip(".")
+                if not name or (target_host and not (target_host == domain or target_host.endswith(f".{domain}"))):
+                    continue
+                priority = 2 if target_host == domain else 1
+                if name not in selected or priority > selected[name][0]:
+                    selected[name] = (priority, value)
+            return "; ".join(f"{name}={value}" for name, (_, value) in selected.items())
+
         last_error: Exception | None = None
         for attempt in range(retries):
             try:
@@ -63,8 +83,14 @@ class BrowserDownloader:
                     )
                     try:
                         cookies = context.cookies()
-                        profile_header = "; ".join(f"{cookie['name']}={cookie['value']}" for cookie in cookies)
-                        return self._read_persisted_cookie_header() or profile_header
+                        try:
+                            persisted = json.loads(self._session_cookie_file().read_text(encoding="utf-8"))
+                        except (OSError, ValueError, TypeError):
+                            persisted = []
+                        combined_header = format_cookies(persisted + cookies)
+                        if combined_header:
+                            return combined_header
+                        return ""
                     finally:
                         context.close()
             except Exception as error:
@@ -76,14 +102,34 @@ class BrowserDownloader:
             f"Could not open the saved Chrome profile after {retries} attempts: {last_error}"
         ) from last_error
 
-    def verify_authenticated_session(self, target_url: str, log: Callable[[str], None] | None = None) -> bool | None:
-        """Verifies authentication indicators on the actual target page in the saved profile."""
-        hostname = (urlparse(target_url).hostname or "").lower()
-        if hostname != "slidemodel.com" and not hostname.endswith(".slidemodel.com"):
-            if log:
-                log("[Browser Automation] Authentication verification is not available for this target domain.")
-            return None
+    def _page_requires_authentication(self, page: Page) -> bool:
+        """Detects generic login, subscription, and upgrade gates without site-specific rules."""
+        if page.locator("a[href*='logout']:visible").count() or page.get_by_text("My Account", exact=True).count():
+            return False
+        if page.locator("input[type='password']").first.is_visible():
+            return True
+        if page.locator("form[action*='signup']:visible, form[action*='register']:visible").count():
+            return True
+        body_text = page.locator("body").inner_text().lower()
+        return any(
+            phrase in body_text
+            for phrase in (
+                "login to download",
+                "log in to download",
+                "sign in to download",
+                "please log in",
+                "please sign in",
+                "upgrade to download",
+                "subscribe to download",
+                "membership required",
+                "complete the form in order to download",
+                "create a free account",
+                "free account to download",
+            )
+        )
 
+    def verify_authenticated_session(self, target_url: str, log: Callable[[str], None] | None = None) -> bool | None:
+        """Verifies generic authentication indicators on the target page."""
         with sync_playwright() as p:
             context = p.chromium.launch_persistent_context(
                 channel="chrome",
@@ -95,11 +141,9 @@ class BrowserDownloader:
                 page = context.new_page()
                 page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
                 page.wait_for_timeout(2000)
-                login_visible = page.locator("a[href*='/account/login']").first.is_visible()
-                email_visible = page.locator("input[name='rcp_user_email']").first.is_visible()
-                is_authenticated = not login_visible
+                is_authenticated = not self._page_requires_authentication(page)
                 if log:
-                    log(f"[Browser Automation] Target-page authentication check at {page.url}: login_link_visible={login_visible}, free_download_email_visible={email_visible}, authenticated={is_authenticated}.")
+                    log(f"[Browser Automation] Target-page authentication check at {page.url}: gated={not is_authenticated}, authenticated={is_authenticated}.")
                 return is_authenticated
             finally:
                 context.close()
@@ -115,16 +159,14 @@ class BrowserDownloader:
             page = pages[0]
             page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(2000)
-            login_visible = page.locator("a[href*='/account/login']").first.is_visible()
-            email_visible = page.locator("input[name='rcp_user_email']").first.is_visible()
-            authenticated = not login_visible
+            authenticated = not self._page_requires_authentication(page)
             if authenticated:
                 cookies = browser.contexts[0].cookies()
                 self._save_persisted_cookies(cookies)
                 if log:
                     log(f"[Browser Automation] Captured {len(cookies)} live session cookies for server-side reuse; values hidden.")
             if log:
-                log(f"[Browser Automation] Live auth check at {page.url}: login_link_visible={login_visible}, free_download_email_visible={email_visible}, authenticated={authenticated}.")
+                log(f"[Browser Automation] Live auth check at {page.url}: gated={not authenticated}, authenticated={authenticated}.")
             return authenticated
 
     def _profile_process_ids(self) -> list[int]:
@@ -231,6 +273,7 @@ class BrowserDownloader:
         log: Callable[[str], None] | None = None,
         timeout_sec: int = 20,
         session_cookies: dict[str, str] | None = None,
+        session_cookie_domain: str | None = None,
     ) -> tuple[str, bytes] | None:
         """
         Visits the page in a persistent Chromium session, finds and clicks the download button/form,
@@ -272,13 +315,14 @@ class BrowserDownloader:
                 accept_downloads=True,
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             )
-            if session_cookies:
-                _log(f"[Browser Automation] Injecting {len(session_cookies)} saved cookie entries (values hidden).")
+            cookie_domain = session_cookie_domain or urlparse(url).hostname
+            if session_cookies and cookie_domain:
+                _log(f"[Browser Automation] Injecting {len(session_cookies)} saved cookie entries for {cookie_domain} (values hidden).")
                 context.add_cookies([
                     {
                         "name": name,
                         "value": value,
-                        "domain": ".slidemodel.com",
+                        "domain": cookie_domain,
                         "path": "/",
                     }
                     for name, value in session_cookies.items()
@@ -289,40 +333,50 @@ class BrowserDownloader:
 
             try:
                 page: Page = context.new_page()
-                page.set_default_timeout(timeout_sec * 1000)
+                timeout_ms = timeout_sec * 1000
+                page.set_default_timeout(timeout_ms)
+                page.set_default_navigation_timeout(timeout_ms)
 
                 _log(f"[Browser Automation] Navigating to target page...")
-                page.goto(url, wait_until="domcontentloaded")
-                page.wait_for_timeout(2000)
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                page.wait_for_timeout(min(500, timeout_ms))
                 _log(f"[Browser Automation] Page loaded at {page.url}.")
 
-                login_link = page.locator("a[href*='/account/login']").first
-                email_field = page.locator("input[name='rcp_user_email']").first
-                login_visible = login_link.is_visible()
-                email_visible = email_field.is_visible()
-                _log(f"[Browser Automation] Auth indicators: login_link_visible={login_visible}, free_download_email_visible={email_visible}.")
-                if login_visible:
-                    _log("[Browser Automation] The saved Chrome session is not authenticated to the target site.")
-                    _log("[Browser Automation] Complete the target site's login in Chrome, then click Login complete before scraping.")
+                password_visible = page.locator("input[type='password']").first.is_visible()
+                body_text = page.locator("body").inner_text(timeout=timeout_ms).lower()
+                gate_phrases = (
+                    "login to download",
+                    "log in to download",
+                    "sign in to download",
+                    "please log in",
+                    "please sign in",
+                    "upgrade to download",
+                    "subscribe to download",
+                    "membership required",
+                    "complete the form in order to download",
+                    "create a free account",
+                    "free account to download",
+                )
+                is_gated = password_visible or any(phrase in body_text for phrase in gate_phrases)
+                if is_gated:
+                    _log("[Browser Automation] Skipping download because the page requires login, subscription, or upgrade.")
                     return None
 
                 # 1. Search for download candidates on the page
                 download_selectors = [
-                    "#box-activate-download-button",
-                    "input[value*='Download' i]",
-                    "input[value*='Continue' i]",
+                    "input[type='submit']",
+                    "button[type='submit']",
+                    "input[type='submit'][value*='Download' i]",
                     "button:has-text('Download')",
                     "button:has-text('PowerPoint')",
                     "button:has-text('PPTX')",
                     "a:has-text('Download PowerPoint')",
                     "a:has-text('Download PPTX')",
-                    "a:has-text('Download Template')",
                     "a:has-text('Download')",
                     "a[href*='.pptx']",
-                    "a[href*='/download/']",
-                    ".btn-download",
-                    ".download-btn",
-                    ".btn-purchase",
+                    "a[href*='.ppt']",
+                    "a[href*='download']",
+                    "[download]",
                 ]
 
                 download_element = None
