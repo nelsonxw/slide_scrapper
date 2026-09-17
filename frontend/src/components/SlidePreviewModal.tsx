@@ -1,6 +1,6 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import { StoredSlideCard } from '../api/client';
-import { IconX, IconDownload, IconTrash, IconExternalLink, IconCloud } from './Icons';
+import { IconX, IconDownload, IconTrash, IconExternalLink, IconCloud, IconEye } from './Icons';
 
 interface SlidePreviewModalProps {
   slide: StoredSlideCard | null;
@@ -13,6 +13,8 @@ export const SlidePreviewModal: React.FC<SlidePreviewModalProps> = ({
   onClose,
   onDeleteSingle,
 }) => {
+  const [viewMode, setViewMode] = useState<'image' | 'pptx'>('pptx');
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -22,6 +24,8 @@ export const SlidePreviewModal: React.FC<SlidePreviewModalProps> = ({
   }, [onClose]);
 
   if (!slide) return null;
+
+  const officeViewerUrl = `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(slide.pptx_url)}`;
 
   return (
     <div
@@ -46,7 +50,7 @@ export const SlidePreviewModal: React.FC<SlidePreviewModalProps> = ({
         style={{
           background: '#ffffff',
           borderRadius: 'var(--radius-lg)',
-          maxWidth: '900px',
+          maxWidth: '1000px',
           width: '100%',
           maxHeight: '90vh',
           display: 'flex',
@@ -75,47 +79,114 @@ export const SlidePreviewModal: React.FC<SlidePreviewModalProps> = ({
             </span>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            style={{
-              background: 'var(--slate-100)',
-              border: 'none',
-              borderRadius: '50%',
-              width: '32px',
-              height: '32px',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: 'var(--slate-600)',
-            }}
-          >
-            <IconX size={18} />
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div style={{ display: 'flex', background: 'var(--slate-100)', borderRadius: 'var(--radius-sm)', padding: '3px' }}>
+              <button
+                type="button"
+                onClick={() => setViewMode('pptx')}
+                style={{
+                  background: viewMode === 'pptx' ? '#ffffff' : 'transparent',
+                  color: viewMode === 'pptx' ? 'var(--slate-900)' : 'var(--slate-500)',
+                  border: 'none',
+                  padding: '6px 12px',
+                  borderRadius: 'var(--radius-sm)',
+                  fontSize: '12px',
+                  fontWeight: '600',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                }}
+              >
+                <IconEye size={14} />
+                <span>PowerPoint</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode('image')}
+                style={{
+                  background: viewMode === 'image' ? '#ffffff' : 'transparent',
+                  color: viewMode === 'image' ? 'var(--slate-900)' : 'var(--slate-500)',
+                  border: 'none',
+                  padding: '6px 12px',
+                  borderRadius: 'var(--radius-sm)',
+                  fontSize: '12px',
+                  fontWeight: '600',
+                  cursor: 'pointer',
+                }}
+              >
+                <span>Image</span>
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={onClose}
+              style={{
+                background: 'var(--slate-100)',
+                border: 'none',
+                borderRadius: '50%',
+                width: '32px',
+                height: '32px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: 'var(--slate-600)',
+              }}
+            >
+              <IconX size={18} />
+            </button>
+          </div>
         </div>
 
-        {/* Modal Body: Slide Preview Image */}
+        {/* Modal Body: PowerPoint Viewer or Preview Image */}
         <div
           style={{
-            padding: '24px',
+            padding: '0',
             background: 'var(--slate-900)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            overflow: 'auto',
+            overflow: 'hidden',
+            flex: 1,
           }}
         >
-          <img
-            src={slide.preview_url}
-            alt={slide.title}
-            style={{
-              maxWidth: '100%',
-              maxHeight: '52vh',
-              objectFit: 'contain',
-              borderRadius: 'var(--radius-sm)',
-              boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
-            }}
-          />
+          {viewMode === 'pptx' ? (
+            <iframe
+              src={officeViewerUrl}
+              title="PowerPoint Viewer"
+              style={{
+                width: '100%',
+                height: '100%',
+                border: 'none',
+              }}
+              sandbox="allow-scripts allow-same-origin allow-popups"
+            />
+          ) : (
+            <div
+              style={{
+                padding: '24px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: '100%',
+                height: '100%',
+                overflow: 'auto',
+              }}
+            >
+              <img
+                src={slide.preview_url}
+                alt={slide.title}
+                style={{
+                  maxWidth: '100%',
+                  maxHeight: '100%',
+                  objectFit: 'contain',
+                  borderRadius: 'var(--radius-sm)',
+                  boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
+                }}
+              />
+            </div>
+          )}
         </div>
 
         {/* Modal Footer: Metadata & Actions */}
