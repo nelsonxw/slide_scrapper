@@ -322,7 +322,7 @@ def cancel_scrape_task(task_id: str):
 
 
 class OpenBrowserLoginRequest(BaseModel):
-    url: str = Field(default="https://slidemodel.com/account/login/", description="Website URL to log in to")
+    url: str = Field(..., description="Target URL to open in the dedicated Chrome session")
 
 
 session_state = {
@@ -379,7 +379,7 @@ def open_browser_login(req: OpenBrowserLoginRequest):
     session_state.update({
         "status": "browser_open",
         "site": req.url,
-        "message": "Chrome is open. Complete login in this same window, then mark login complete; scraping will use this live session.",
+        "message": f"Chrome is open at {req.url}. Complete login in this same window, then mark login complete; scraping will use this live session.",
     })
 
     def _run_browser(stop_event: threading.Event):

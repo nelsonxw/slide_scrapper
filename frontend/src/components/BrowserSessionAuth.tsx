@@ -38,17 +38,21 @@ export const BrowserSessionAuth: React.FC<BrowserSessionAuthProps> = ({ targetUr
   }, []);
 
   const connectSession = async () => {
-    const loginUrl = targetUrl.trim() || 'https://www.slidemodel.com/account/login/';
+    const targetUrlToOpen = targetUrl.trim();
+    if (!targetUrlToOpen) {
+      setError('Please enter a target URL in the form before opening the browser session.');
+      return;
+    }
     setIsLoading(true);
     setError(null);
-    setSession({ status: 'connecting', site: loginUrl, message: 'Complete login in the visible browser window, then click Login complete.', debug_logs: session.debug_logs });
+    setSession({ status: 'connecting', site: targetUrlToOpen, message: `Opening ${targetUrlToOpen} in dedicated Chrome window. Complete login in this same window, then mark login complete.`, debug_logs: session.debug_logs });
 
     try {
-      const result = await api.openBrowserLogin(loginUrl);
+      const result = await api.openBrowserLogin(targetUrlToOpen);
       setSession(result);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to open the browser session.');
-      setSession({ status: 'error', site: loginUrl, message: 'The browser session could not be opened.', debug_logs: [] });
+      setSession({ status: 'error', site: targetUrlToOpen, message: 'The browser session could not be opened.', debug_logs: [] });
     } finally {
       setIsLoading(false);
     }
@@ -204,7 +208,7 @@ export const BrowserSessionAuth: React.FC<BrowserSessionAuthProps> = ({ targetUr
             fontWeight: 700,
           }}
         >
-          {isConnecting ? 'Starting Chrome...' : isBrowserOpen ? 'Mark login complete' : isConnected ? 'Reopen Chrome session' : 'Open target in Chrome'}
+          {isConnecting ? 'Starting Chrome...' : isBrowserOpen ? 'Mark login complete' : isConnected ? 'Reopen target in Chrome' : 'Open target in Chrome'}
         </button>
         {isConnected && (
           <button
