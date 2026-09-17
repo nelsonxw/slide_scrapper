@@ -253,6 +253,14 @@ class BrowserDownloader:
             finally:
                 context.close()
 
+    def get_live_session_cookies(self) -> list[dict[str, object]]:
+        """Extracts cookies from the live Chrome CDP session."""
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp("http://127.0.0.1:9222")
+            if not browser.contexts:
+                return []
+            return browser.contexts[0].cookies()
+
     def verify_live_authenticated_session(self, target_url: str, log: Callable[[str], None] | None = None) -> bool:
         """Checks authentication indicators on the actual target page in open Chrome."""
         with sync_playwright() as p:
@@ -269,6 +277,9 @@ class BrowserDownloader:
             has_authentication_cookies = self.has_authentication_cookies(cookies)
             authenticated = has_authentication_cookies
             if has_authentication_cookies:
+                if log:
+                    log("[Browser Automation] Clearing previously saved session cookies and saving new live session.")
+                self._session_cookie_file().unlink(missing_ok=True)
                 self._save_persisted_cookies(cookies)
             if log:
                 log(
@@ -345,6 +356,9 @@ class BrowserDownloader:
         def _log(msg: str):
             if log:
                 log(msg)
+
+        _log("[Browser Automation] Clearing any previously saved session cookies before opening new Chrome session.")
+        self._session_cookie_file().unlink(missing_ok=True)
 
         chrome_candidates = [
             shutil.which("chrome.exe"),

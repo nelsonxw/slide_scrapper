@@ -93,23 +93,24 @@ def _run_scrape_pipeline(
         browser_session = BrowserDownloader()
         browser_session_was_open = browser_session.is_browser_open()
         if browser_session_was_open:
-            log("Dedicated Chrome is open; gated pages will use the live authenticated CDP session.")
+            log("Dedicated Chrome is open; using live authenticated CDP session.")
         try:
             if browser_session_was_open:
                 session_cookies = browser_session.get_live_session_cookies()
                 log(f"Loaded {len(session_cookies)} cookies from the live Chrome CDP session (values hidden).")
             else:
-                session_cookies = browser_session.get_session_cookies(target_url=target_url)
+                session_cookies = []
+                log("Dedicated Chrome is not open; no authenticated session available.")
         except Exception as session_error:
             session_cookies = []
-            log(f"Saved browser session is unavailable; continuing without it: {session_error}")
+            log(f"Live session is unavailable; continuing without authentication: {session_error}")
         has_authentication_cookies = browser_session.has_authentication_cookies(session_cookies)
         log(
             f"Authentication={str(has_authentication_cookies).lower()} "
             f"(entries={len(session_cookies)}; values hidden)."
         )
         if has_authentication_cookies:
-            log(f"Using the locally saved browser session for authenticated requests ({len(session_cookies)} cookie entries loaded; values hidden).")
+            log(f"Using live browser session for authenticated requests ({len(session_cookies)} cookie entries loaded; values hidden).")
         else:
             log("Authentication=false before crawling; no recognized authentication cookies were available.")
         task["current_step"] = "Crawling site & searching for download buttons..."
