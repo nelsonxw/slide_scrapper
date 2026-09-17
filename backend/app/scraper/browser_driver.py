@@ -24,6 +24,38 @@ from app.scraper.detector import is_powerpoint_content
 
 
 class BrowserDownloader:
+    _NON_AUTH_COOKIE_MARKERS = (
+        "_ga",
+        "_gid",
+        "_gat",
+        "_fbp",
+        "_gcl_",
+        "_uet",
+        "g_state",
+        "hellobar",
+        "analytics",
+        "consent",
+        "cookie",
+        "wp-settings",
+        "wordpress_test_cookie",
+    )
+    _AUTH_COOKIE_MARKERS = (
+        "wordpress_logged_in_",
+        "wordpress_sec_",
+        "auth",
+        "authenticated",
+        "access_token",
+        "refresh_token",
+        "session",
+        "sess",
+        "sid",
+        "token",
+        "jwt",
+        "login",
+        "member",
+        "rcp_",
+    )
+
     def __init__(self, user_data_dir: Path | None = None, headless: bool = True):
         self.user_data_dir = user_data_dir or (settings.data_dir / "browser_profile")
         self.user_data_dir.mkdir(parents=True, exist_ok=True)
@@ -46,8 +78,51 @@ class BrowserDownloader:
         cookie_file = self._session_cookie_file()
         cookie_file.write_text(json.dumps(cookies), encoding="utf-8")
 
+    @classmethod
+    def is_authentication_cookie(cls, cookie: dict[str, object]) -> bool:
+        """Identifies likely login cookies while excluding known analytics/preferences cookies."""
+        name = str(cookie.get("name", "")).lower()
+        if not name or any(marker in name for marker in cls._NON_AUTH_COOKIE_MARKERS):
+            return False
+        return any(marker in name for marker in cls._AUTH_COOKIE_MARKERS)
+
+    @classmethod
+    def has_authentication_cookies(cls, cookies: list[dict[str, object]]) -> bool:
+        return any(cls.is_authentication_cookie(cookie) for cookie in cookies)
+
+    def _read_persisted_cookies(self) -> list[dict[str, object]]:
+        try:
+            cookies = json.loads(self._session_cookie_file().read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return []
+        return cookies if isinstance(cookies, list) else []
+
     def has_persisted_session(self) -> bool:
-        return bool(self._read_persisted_cookie_header())
+        return self.has_authentication_cookies(self._read_persisted_cookies())
+
+    @staticmethod
+    def _merge_session_cookies(
+        persisted_cookies: list[dict[str, object]],
+        current_cookies: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        """Merges the live profile with the last captured snapshot without losing login cookies."""
+        merged = {
+            (
+                str(cookie.get("name", "")),
+                str(cookie.get("domain", "")).lower(),
+                str(cookie.get("path", "/")),
+            ): cookie
+            for cookie in persisted_cookies
+        }
+        merged.update({
+            (
+                str(cookie.get("name", "")),
+                str(cookie.get("domain", "")).lower(),
+                str(cookie.get("path", "/")),
+            ): cookie
+            for cookie in current_cookies
+        })
+        return list(merged.values())
 
     def get_session_cookies(
         self,
@@ -74,10 +149,9 @@ class BrowserDownloader:
                         except (OSError, ValueError, TypeError):
                             persisted = []
 
+                        current_cookies = self._filter_session_cookies(context.cookies(), target_host)
                         persisted_cookies = self._filter_session_cookies(persisted, target_host)
-                        if persisted_cookies:
-                            return persisted_cookies
-                        return self._filter_session_cookies(context.cookies(), target_host)
+                        return self._merge_session_cookies(persisted_cookies, current_cookies)
                     finally:
                         context.close()
             except Exception as error:
@@ -126,30 +200,26 @@ class BrowserDownloader:
         return list(selected.values())
 
     def _page_requires_authentication(self, page: Page) -> bool:
-        """Detects generic login, subscription, and upgrade gates without site-specific rules."""
+        """Detects strong visible login gates without treating listing copy as a gate."""
         if page.locator("a[href*='logout']:visible").count() or page.get_by_text("My Account", exact=True).count():
             return False
-        if page.locator("input[type='password']").first.is_visible():
+        if page.locator("input[type='password']:visible").count():
             return True
-        if page.locator("form[action*='signup']:visible, form[action*='register']:visible").count():
+        if page.locator(
+            "form[action*='login']:visible, form[action*='signin']:visible, "
+            "form[action*='signup']:visible, form[action*='register']:visible"
+        ).count():
             return True
-        body_text = page.locator("body").inner_text().lower()
-        return any(
-            phrase in body_text
-            for phrase in (
-                "login to download",
-                "log in to download",
-                "sign in to download",
-                "please log in",
-                "please sign in",
-                "upgrade to download",
-                "subscribe to download",
-                "membership required",
-                "complete the form in order to download",
-                "create a free account",
-                "free account to download",
-            )
-        )
+
+        auth_download_control = page.locator(
+            "a[href*='login'][href*='download']:visible, "
+            "a[href*='signin'][href*='download']:visible, "
+            "a[href*='signup'][href*='download']:visible"
+        ).count()
+        if auth_download_control:
+            return True
+
+        return False
 
     def verify_authenticated_session(self, target_url: str, log: Callable[[str], None] | None = None) -> bool | None:
         """Verifies generic authentication indicators on the target page."""
@@ -164,9 +234,21 @@ class BrowserDownloader:
                 page = context.new_page()
                 page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
                 page.wait_for_timeout(2000)
-                is_authenticated = not self._page_requires_authentication(page)
+                page_is_not_gated = not self._page_requires_authentication(page)
+                saved_cookies = self._read_persisted_cookies()
+                has_authentication_cookies = self.has_authentication_cookies(saved_cookies)
+                is_authenticated = has_authentication_cookies
                 if log:
-                    log(f"[Browser Automation] Target-page authentication check at {page.url}: gated={not is_authenticated}, authenticated={is_authenticated}.")
+                    log(
+                        "[Browser Automation] Authentication="
+                        f"{str(is_authenticated).lower()}; "
+                        f"authentication cookies saved={str(has_authentication_cookies).lower()} "
+                        f"({len(saved_cookies)} saved entries; values hidden)."
+                    )
+                    if not page_is_not_gated:
+                        log("[Browser Automation] Target page still appears gated after profile verification.")
+                if log:
+                    log(f"[Browser Automation] Target-page authentication check at {page.url}: gated={not page_is_not_gated}, authenticated={is_authenticated}.")
                 return is_authenticated
             finally:
                 context.close()
@@ -182,14 +264,23 @@ class BrowserDownloader:
             page = pages[0]
             page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
             page.wait_for_timeout(2000)
-            authenticated = not self._page_requires_authentication(page)
-            if authenticated:
-                cookies = browser.contexts[0].cookies()
+            page_is_not_gated = not self._page_requires_authentication(page)
+            cookies = browser.contexts[0].cookies()
+            has_authentication_cookies = self.has_authentication_cookies(cookies)
+            authenticated = has_authentication_cookies
+            if has_authentication_cookies:
                 self._save_persisted_cookies(cookies)
-                if log:
-                    log(f"[Browser Automation] Captured {len(cookies)} live session cookies for server-side reuse; values hidden.")
             if log:
-                log(f"[Browser Automation] Live auth check at {page.url}: gated={not authenticated}, authenticated={authenticated}.")
+                log(
+                    "[Browser Automation] Authentication="
+                    f"{str(authenticated).lower()}; "
+                    f"authentication cookies captured={str(has_authentication_cookies).lower()} "
+                    f"({len(cookies)} total entries; values hidden)."
+                )
+                if not page_is_not_gated:
+                    log("[Browser Automation] The open browser page still appears gated.")
+            if log:
+                log(f"[Browser Automation] Live auth check at {page.url}: gated={not page_is_not_gated}, authenticated={authenticated}.")
             return authenticated
 
     def _profile_process_ids(self) -> list[int]:
@@ -330,6 +421,104 @@ class BrowserDownloader:
             prepared.append(prepared_cookie)
         return prepared
 
+    def get_live_session_cookies(self) -> list[dict[str, object]]:
+        """Returns cookies from the currently open scraper-owned Chrome CDP session."""
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp("http://127.0.0.1:9222")
+            if not browser.contexts:
+                return []
+            return browser.contexts[0].cookies()
+
+    def _download_powerpoint_from_live_browser(
+        self,
+        url: str,
+        log: Callable[[str], None] | None,
+        timeout_sec: int,
+    ) -> tuple[str, bytes] | None:
+        def _log(message: str):
+            if log:
+                log(message)
+
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp("http://127.0.0.1:9222")
+            if not browser.contexts:
+                raise RuntimeError("No browser context was found in the live scraper session")
+            context = browser.contexts[0]
+            page = context.pages[0] if context.pages else context.new_page()
+            timeout_ms = timeout_sec * 1000
+            page.set_default_timeout(timeout_ms)
+            page.set_default_navigation_timeout(timeout_ms)
+            _log(f"[Browser Automation] Using the live authenticated CDP session for: {url}")
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            page.wait_for_timeout(min(1000, timeout_ms))
+
+            auth_gate_detected = self._page_requires_authentication(page)
+            authentication = self.has_authentication_cookies(context.cookies())
+            _log(
+                "[Browser Automation] Authentication="
+                f"{str(authentication).lower()} in live CDP session; "
+                f"authentication_gate={str(auth_gate_detected).lower()}."
+            )
+            if auth_gate_detected:
+                _log("[Browser Automation] Live CDP page still requires login, subscription, or upgrade.")
+                return None
+
+            download_selectors = [
+                "input[type='submit']", "button[type='submit']",
+                "input[type='submit'][value*='Download' i]",
+                "button:has-text('Download')", "button:has-text('PowerPoint')",
+                "button:has-text('PPTX')", "a:has-text('Download PowerPoint')",
+                "a:has-text('Download PPTX')", "a:has-text('Download')",
+                "a[href*='.pptx']", "a[href*='.ppt']", "a[href*='download']", "[download]",
+            ]
+            download_element = None
+            for selector in download_selectors:
+                try:
+                    locator = page.locator(selector).first
+                    if locator.is_visible():
+                        download_element = locator
+                        _log(f"[Browser Automation] Detected live download element: '{selector}'")
+                        break
+                except Exception:
+                    continue
+            if not download_element:
+                _log("[Browser Automation] No interactive download button found in the live session.")
+                return None
+
+            ppt_responses: list[Any] = []
+
+            def capture_ppt_response(response):
+                content_type = response.headers.get("content-type", "").lower()
+                response_url = response.url.lower()
+                if "presentation" in content_type or response_url.endswith((".pptx", ".ppt")):
+                    ppt_responses.append(response)
+
+            context.on("response", capture_ppt_response)
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                try:
+                    with page.expect_download(timeout=timeout_ms) as download_info:
+                        download_element.click()
+                    download: Download = download_info.value
+                    suggested_name = download.suggested_filename or "presentation.pptx"
+                    save_path = Path(tmp_dir) / suggested_name
+                    download.save_as(str(save_path))
+                    if save_path.exists() and save_path.stat().st_size > 0:
+                        content = save_path.read_bytes()
+                        is_ppt, fmt = is_powerpoint_content(content)
+                        if is_ppt:
+                            _log(f"[Browser Automation] Captured {fmt.upper()} file in live CDP session: {suggested_name}")
+                            return suggested_name, content
+                except Exception as click_error:
+                    _log(f"[Browser Automation] Live download wait notice: {click_error}")
+                    for response in ppt_responses:
+                        content = response.body()
+                        is_ppt, fmt = is_powerpoint_content(content)
+                        if is_ppt:
+                            filename = Path(urlparse(response.url).path).name or "presentation.pptx"
+                            _log(f"[Browser Automation] Captured {fmt.upper()} response in live CDP session: {filename}")
+                            return filename, content
+            return None
+
     def download_powerpoint_from_page(
         self,
         url: str,
@@ -346,6 +535,10 @@ class BrowserDownloader:
         def _log(msg: str):
             if log:
                 log(msg)
+
+        if self.is_browser_open():
+            _log("[Browser Automation] Reusing the live scraper-owned Chrome session through CDP.")
+            return self._download_powerpoint_from_live_browser(url, log, timeout_sec)
 
         _log(f"[Browser Automation] Launching Chromium session for: {url}")
 
@@ -379,6 +572,7 @@ class BrowserDownloader:
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             )
             cookie_domain = session_cookie_domain or urlparse(url).hostname
+            cookies = []
             if session_cookies and cookie_domain:
                 cookies = self._prepare_context_cookies(
                     session_cookies,
@@ -387,6 +581,10 @@ class BrowserDownloader:
                 _log(f"[Browser Automation] Injecting {len(cookies)} saved cookie entries for {cookie_domain} (values hidden).")
                 if cookies:
                     context.add_cookies(cookies)
+            _log(
+                "[Browser Automation] Authentication="
+                f"{str(self.has_authentication_cookies(cookies)).lower()}."
+            )
 
             # Evade navigator.webdriver detection
             context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
@@ -402,23 +600,14 @@ class BrowserDownloader:
                 page.wait_for_timeout(min(500, timeout_ms))
                 _log(f"[Browser Automation] Page loaded at {page.url}.")
 
-                password_visible = page.locator("input[type='password']").first.is_visible()
-                body_text = page.locator("body").inner_text(timeout=timeout_ms).lower()
-                gate_phrases = (
-                    "login to download",
-                    "log in to download",
-                    "sign in to download",
-                    "please log in",
-                    "please sign in",
-                    "upgrade to download",
-                    "subscribe to download",
-                    "membership required",
-                    "complete the form in order to download",
-                    "create a free account",
-                    "free account to download",
+                auth_gate_detected = self._page_requires_authentication(page)
+                authentication = self.has_authentication_cookies(cookies)
+                _log(
+                    "[Browser Automation] Authentication="
+                    f"{str(authentication).lower()} after target-page navigation; "
+                    f"authentication_gate={str(auth_gate_detected).lower()}."
                 )
-                is_gated = password_visible or any(phrase in body_text for phrase in gate_phrases)
-                if is_gated:
+                if auth_gate_detected:
                     _log("[Browser Automation] Skipping download because the page requires login, subscription, or upgrade.")
                     return None
 

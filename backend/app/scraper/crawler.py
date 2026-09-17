@@ -39,6 +39,7 @@ class SiteScraper:
         cookies: str | dict[str, str] | list[Cookie] | None = None,
         custom_headers: dict[str, str] | None = None,
         use_browser: bool = True,
+        browser_driver: BrowserDownloader | None = None,
     ):
         self.target_url = target_url.strip()
         if not self.target_url.startswith(("http://", "https://")):
@@ -47,6 +48,7 @@ class SiteScraper:
         self.max_crawl_pages = max_crawl_pages
         self.max_depth = max_depth
         self.use_browser = use_browser
+        self.browser_driver = browser_driver or BrowserDownloader()
         self._browser_processed_pages: set[str] = set()
         self.headers = {
             "User-Agent": user_agent
@@ -95,6 +97,35 @@ class SiteScraper:
             if domain:
                 cookie_kwargs["domain"] = domain
             client.cookies.set(name, value, **cookie_kwargs)
+
+    def _response_requires_authentication(self, response: httpx.Response) -> bool:
+        """Detects strong authentication gates without treating listing copy as a gate."""
+        final_url = str(response.url).lower()
+        auth_path_markers = ("/login", "/signin", "/sign-in", "/signup", "/register")
+        if any(marker in final_url for marker in auth_path_markers):
+            return True
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        if soup.select_one("input[type='password']"):
+            return True
+
+        auth_forms = soup.select(
+            "form[action*='login' i], form[action*='signin' i], "
+            "form[action*='signup' i], form[action*='register' i]"
+        )
+        if auth_forms:
+            return True
+
+        download_auth_controls = soup.select(
+            "a[href*='login' i][href*='download' i], "
+            "a[href*='signin' i][href*='download' i], "
+            "a[href*='signup' i][href*='download' i], "
+            "form[action*='login' i], form[action*='signin' i], form[action*='signup' i]"
+        )
+        if download_auth_controls:
+            return True
+
+        return False
 
     def _is_download_element(self, tag: BeautifulSoup, href_or_action: str) -> bool:
         """
@@ -220,17 +251,15 @@ class SiteScraper:
                     log(f"HTTP {resp.status_code} on {current_url}")
                     continue
 
-                if len(visited_pages) == 1:
-                    response_text = resp.text.lower()
-                    has_account_marker = "logout" in response_text or "my account" in response_text
-                    has_signup_marker = "complete the form in order to download" in response_text
-                    log(
-                        "Authenticated request check: "
-                        f"HTTP {resp.status_code}, final_url={resp.url}, "
-                        f"cookies_applied={len(self.cookies)}, "
-                        f"account_marker={has_account_marker}, "
-                        f"signup_marker={has_signup_marker}"
-                    )
+                auth_gate_detected = self._response_requires_authentication(resp)
+                authentication = BrowserDownloader.has_authentication_cookies(self.cookies)
+                log(
+                    "Authentication check: "
+                    f"authentication={str(authentication).lower()}, "
+                    f"HTTP {resp.status_code}, final_url={resp.url}, "
+                    f"cookies_applied={len(self.cookies)}, "
+                    f"auth_gate_detected={auth_gate_detected}"
+                )
 
                 content_type = resp.headers.get("content-type", "").lower()
 
@@ -405,19 +434,7 @@ class SiteScraper:
                         "form",
                         action=re.compile(r"/account/signup(?:/|\?)", re.IGNORECASE),
                     )
-                    has_password_field = bool(sub_soup.select("input[type='password']"))
-                    gate_phrases = (
-                        "login to download",
-                        "log in to download",
-                        "sign in to download",
-                        "please log in",
-                        "please sign in",
-                        "create an account to download",
-                        "upgrade to download",
-                        "subscribe to download",
-                        "membership required",
-                    )
-                    is_auth_gate = has_password_field or any(phrase in page_text for phrase in gate_phrases)
+                    is_auth_gate = self._response_requires_authentication(resp)
                     is_signup_download_form = bool(
                         signup_download_form
                         and signup_download_form.find("input", attrs={"type": "email"})
@@ -435,17 +452,23 @@ class SiteScraper:
                         )
                     ) or is_signup_download_form
 
-                    if is_auth_gate:
+                    live_browser_available = self.use_browser and self.browser_driver.is_browser_open()
+                    if is_auth_gate and not live_browser_available:
                         log(f"Skipping gated download page for {url}; login, subscription, or upgrade is required.")
-                    elif is_interactive_download and self.use_browser:
+                    elif self.use_browser and (is_interactive_download or is_auth_gate):
+                        if is_auth_gate:
+                            log(f"Page appears gated in HTTP response; retrying through the live authenticated browser: {source_page_url}")
                         browser_target_url = url if interactive_download_form else source_page_url
                         if browser_target_url in self._browser_processed_pages:
                             return None
                         self._browser_processed_pages.add(browser_target_url)
-                        log("Launching automated browser session to intercept file download...")
+                        authentication = BrowserDownloader.has_authentication_cookies(self.cookies)
+                        log(
+                            "Launching automated browser session to intercept file download; "
+                            f"authentication={str(authentication).lower()}."
+                        )
                         try:
-                            b_driver = BrowserDownloader()
-                            res = b_driver.download_powerpoint_from_page(
+                            res = self.browser_driver.download_powerpoint_from_page(
                                 browser_target_url,
                                 log=log,
                                 session_cookies=self.cookies,

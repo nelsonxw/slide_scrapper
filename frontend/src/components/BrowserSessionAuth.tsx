@@ -78,6 +78,18 @@ export const BrowserSessionAuth: React.FC<BrowserSessionAuthProps> = ({ targetUr
     }
   };
 
+  const closeBrowser = async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      setSession(await api.closeBrowserSession());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to close the scraper browser.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const clearSession = async () => {
     setIsLoading(true);
     setError(null);
@@ -111,7 +123,7 @@ export const BrowserSessionAuth: React.FC<BrowserSessionAuthProps> = ({ targetUr
         <div>
           <strong style={{ display: 'block', fontSize: '13px', color: 'var(--slate-800)' }}>Protected-site session</strong>
           <span style={{ fontSize: '11px', color: 'var(--slate-500)' }}>
-            The target page opens in an isolated Chrome session. If SlideModel says you need to log in, click its Log into Your Account link and complete login in this same window. Login from another Chrome profile will not transfer.
+            The target page opens in an isolated Chrome session. Complete login in this same window, then leave it open while scraping uses the live authenticated session. Login from another Chrome profile will not transfer.
           </span>
         </div>
         <span
@@ -158,6 +170,24 @@ export const BrowserSessionAuth: React.FC<BrowserSessionAuthProps> = ({ targetUr
             }}
           >
             Check login
+          </button>
+        )}
+        {isBrowserOpen && (
+          <button
+            type="button"
+            onClick={closeBrowser}
+            disabled={isLoading}
+            style={{
+              background: '#ffffff',
+              color: 'var(--slate-700)',
+              border: '1px solid var(--slate-300)',
+              borderRadius: 'var(--radius-sm)',
+              padding: '7px 12px',
+              fontSize: '12px',
+              fontWeight: 700,
+            }}
+          >
+            Close scraper browser (cancel)
           </button>
         )}
         <button

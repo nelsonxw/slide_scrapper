@@ -129,6 +129,14 @@ export const api = {
     return res.json();
   },
 
+  async closeBrowserSession(): Promise<BrowserSessionStatus> {
+    const res = await fetch(`${API_BASE}/scrape/session/close`, { method: 'POST' });
+    if (!res.ok) {
+      throw new Error('Failed to close scraper browser');
+    }
+    return res.json();
+  },
+
   async clearBrowserSession(): Promise<BrowserSessionStatus> {
     const res = await fetch(`${API_BASE}/scrape/session`, { method: 'DELETE' });
     if (!res.ok) {
