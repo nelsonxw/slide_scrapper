@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect } from 'react';
 import { StoredSlideCard } from '../api/client';
-import { IconX, IconDownload, IconTrash, IconExternalLink, IconCloud, IconEye } from './Icons';
+import { IconX, IconDownload, IconTrash, IconExternalLink, IconCloud } from './Icons';
 
 interface SlidePreviewModalProps {
   slide: StoredSlideCard | null;
@@ -13,8 +13,6 @@ export const SlidePreviewModal: React.FC<SlidePreviewModalProps> = ({
   onClose,
   onDeleteSingle,
 }) => {
-  const [viewMode, setViewMode] = useState<'image' | 'pptx'>('pptx');
-
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -79,67 +77,26 @@ export const SlidePreviewModal: React.FC<SlidePreviewModalProps> = ({
             </span>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            <div style={{ display: 'flex', background: 'var(--slate-100)', borderRadius: 'var(--radius-sm)', padding: '3px' }}>
-              <button
-                type="button"
-                onClick={() => setViewMode('pptx')}
-                style={{
-                  background: viewMode === 'pptx' ? '#ffffff' : 'transparent',
-                  color: viewMode === 'pptx' ? 'var(--slate-900)' : 'var(--slate-500)',
-                  border: 'none',
-                  padding: '6px 12px',
-                  borderRadius: 'var(--radius-sm)',
-                  fontSize: '12px',
-                  fontWeight: '600',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                }}
-              >
-                <IconEye size={14} />
-                <span>PowerPoint</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setViewMode('image')}
-                style={{
-                  background: viewMode === 'image' ? '#ffffff' : 'transparent',
-                  color: viewMode === 'image' ? 'var(--slate-900)' : 'var(--slate-500)',
-                  border: 'none',
-                  padding: '6px 12px',
-                  borderRadius: 'var(--radius-sm)',
-                  fontSize: '12px',
-                  fontWeight: '600',
-                  cursor: 'pointer',
-                }}
-              >
-                <span>Image</span>
-              </button>
-            </div>
-
-            <button
-              type="button"
-              onClick={onClose}
-              style={{
-                background: 'var(--slate-100)',
-                border: 'none',
-                borderRadius: '50%',
-                width: '32px',
-                height: '32px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                color: 'var(--slate-600)',
-              }}
-            >
-              <IconX size={18} />
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            style={{
+              background: 'var(--slate-100)',
+              border: 'none',
+              borderRadius: '50%',
+              width: '32px',
+              height: '32px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: 'var(--slate-600)',
+            }}
+          >
+            <IconX size={18} />
+          </button>
         </div>
 
-        {/* Modal Body: PowerPoint Viewer or Preview Image */}
+        {/* Modal Body: PowerPoint Viewer */}
         <div
           style={{
             padding: '0',
@@ -151,42 +108,16 @@ export const SlidePreviewModal: React.FC<SlidePreviewModalProps> = ({
             flex: 1,
           }}
         >
-          {viewMode === 'pptx' ? (
-            <iframe
-              src={officeViewerUrl}
-              title="PowerPoint Viewer"
-              style={{
-                width: '100%',
-                height: '100%',
-                border: 'none',
-              }}
-              sandbox="allow-scripts allow-same-origin allow-popups"
-            />
-          ) : (
-            <div
-              style={{
-                padding: '24px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                width: '100%',
-                height: '100%',
-                overflow: 'auto',
-              }}
-            >
-              <img
-                src={slide.preview_url}
-                alt={slide.title}
-                style={{
-                  maxWidth: '100%',
-                  maxHeight: '100%',
-                  objectFit: 'contain',
-                  borderRadius: 'var(--radius-sm)',
-                  boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
-                }}
-              />
-            </div>
-          )}
+          <iframe
+            src={officeViewerUrl}
+            title="PowerPoint Viewer"
+            style={{
+              width: '100%',
+              height: '100%',
+              border: 'none',
+            }}
+            sandbox="allow-scripts allow-same-origin allow-popups"
+          />
         </div>
 
         {/* Modal Footer: Metadata & Actions */}
