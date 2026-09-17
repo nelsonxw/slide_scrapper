@@ -187,6 +187,170 @@ class SiteScraper:
 
         return False
 
+    def _extract_download_candidates(
+        self,
+        soup: BeautifulSoup,
+        current_url: str,
+    ) -> list[tuple[str, str]]:
+        candidates: list[tuple[str, str]] = []
+        for tag in soup.find_all(["a", "button", "form", "input", "div", "span"]):
+            href = (
+                tag.get("href")
+                or tag.get("data-href")
+                or tag.get("data-url")
+                or tag.get("action")
+                or tag.get("formaction")
+                or (tag.find_parent("form").get("action") if tag.find_parent("form") else None)
+            )
+            if not href or href.startswith(("javascript:", "mailto:", "tel:", "#")):
+                continue
+
+            full_url = urljoin(current_url, href)
+            if not self._is_download_element(tag, full_url):
+                continue
+
+            link_title = (
+                tag.get_text(strip=True)
+                or tag.get("value")
+                or tag.get("title")
+                or tag.get("aria-label")
+                or self._extract_title_from_url(full_url)
+            )
+            clean_title = re.sub(
+                r"(?i)\b(download|free|pptx|ppt|powerpoint|template|get)\b",
+                "",
+                str(link_title),
+            ).strip()
+            candidates.append((full_url, clean_title or self._extract_title_from_url(full_url)))
+
+        for ppt_match in re.finditer(
+            r'https?://[^\s"\'<>]+\.(?:pptx|ppt)(?:\?[^\s"\'<>]*)?',
+            str(soup),
+            re.IGNORECASE,
+        ):
+            matched_url = ppt_match.group(0)
+            candidates.append((matched_url, self._extract_title_from_url(matched_url)))
+        return candidates
+
+    def _extract_internal_links(
+        self,
+        soup: BeautifulSoup,
+        current_url: str,
+        root_hostname: str,
+    ) -> list[str]:
+        links: list[str] = []
+        for anchor in soup.find_all("a", href=True):
+            href = anchor["href"].strip()
+            if not href or href.startswith(("javascript:", "mailto:", "tel:", "#")):
+                continue
+            sub_url = urljoin(current_url, href)
+            parsed_sub = urlparse(sub_url)
+            sub_hostname = (parsed_sub.hostname or "").lower()
+            if sub_hostname != root_hostname and not sub_hostname.endswith(f".{root_hostname}"):
+                continue
+            if parsed_sub.scheme not in {"http", "https"}:
+                continue
+            if parsed_sub.path.lower().rstrip("/").endswith(
+                (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".pdf", ".zip", ".css", ".js", ".mp4", ".mp3", ".json", ".xml")
+            ):
+                continue
+            links.append(sub_url)
+        return links
+
+    def _crawl_via_live_browser(
+        self,
+        root_hostname: str,
+        on_log: Callable[[str], None] | None,
+        on_found: Callable[[DiscoveredPowerPoint], None] | None,
+        should_stop: Callable[[], bool] | None,
+    ) -> list[DiscoveredPowerPoint]:
+        def log(message: str):
+            if on_log:
+                on_log(message)
+
+        discovered_items: list[DiscoveredPowerPoint] = []
+        visited_pages: set[str] = set()
+        queue: collections.deque[tuple[str, int]] = collections.deque([(self.target_url, 0)])
+
+        with self.browser_driver.connect_live_browser() as browser:
+            if not browser.contexts:
+                log("Live CDP browser has no context; no rendered pages can be crawled.")
+                return []
+
+            context = browser.contexts[0]
+            page = context.pages[0] if context.pages else context.new_page()
+            page.set_default_timeout(20000)
+            page.set_default_navigation_timeout(30000)
+            log("Active Chrome session detected. Crawling rendered pages through live CDP.")
+
+            while queue and len(visited_pages) < self.max_crawl_pages:
+                if should_stop and should_stop():
+                    log("Crawling stopped by user.")
+                    break
+
+                current_url, depth = queue.popleft()
+                clean_url = current_url.split("#")[0].rstrip("/")
+                if clean_url in visited_pages:
+                    continue
+                visited_pages.add(clean_url)
+                log(f"Crawling rendered page ({len(visited_pages)}/{self.max_crawl_pages}, depth={depth}): {current_url}")
+
+                try:
+                    page.goto(current_url, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(500)
+                    rendered_html = page.content()
+                except Exception as error:
+                    log(f"Failed to render {current_url} in live browser: {error}")
+                    continue
+
+                soup = BeautifulSoup(rendered_html, "html.parser")
+                auth_gate_detected = self.browser_driver.page_requires_authentication(page)
+                authentication = BrowserDownloader.has_authentication_cookies(context.cookies())
+                log(
+                    "Live browser authentication check: "
+                    f"authentication={str(authentication).lower()}, "
+                    f"final_url={page.url}, auth_gate_detected={str(auth_gate_detected).lower()}"
+                )
+
+                candidates = self._extract_download_candidates(soup, page.url)
+                if candidates:
+                    log(f"Rendered page exposes {len(candidates)} download candidates.")
+                has_download_control = self.browser_driver.has_visible_download_control(page)
+                if candidates and has_download_control and page.url not in self._browser_processed_pages:
+                    self._browser_processed_pages.add(page.url)
+                    try:
+                        result = self.browser_driver.download_powerpoint_from_live_page(
+                            page,
+                            page.url,
+                            log=log,
+                            timeout_sec=30,
+                        )
+                    except Exception as error:
+                        log(f"Live browser download error on {page.url}: {error}")
+                        result = None
+                    if result:
+                        name, content = result
+                        item = DiscoveredPowerPoint(
+                            title=name.rsplit(".", 1)[0].replace("_", " ").title(),
+                            download_url=page.url,
+                            source_page_url=current_url,
+                            format_type="pptx",
+                            content_bytes=content,
+                            file_size=len(content),
+                        )
+                        discovered_items.append(item)
+                        if on_found:
+                            on_found(item)
+
+                if depth < self.max_depth:
+                    for sub_url in self._extract_internal_links(soup, page.url, root_hostname):
+                        clean_sub = sub_url.split("#")[0].rstrip("/")
+                        if clean_sub not in visited_pages:
+                            queue.append((sub_url, depth + 1))
+
+        log(f"Live browser crawl complete. Discovered {len(discovered_items)} valid PowerPoint presentations across {len(visited_pages)} pages.")
+        return discovered_items
+
     def crawl_and_extract(
         self,
         on_log: Callable[[str], None] | None = None,
@@ -214,10 +378,18 @@ class SiteScraper:
                     on_found(item)
                 return [item]
 
+        self._browser_processed_pages.clear()
+        if self.use_browser and self.browser_driver.is_browser_open():
+            return self._crawl_via_live_browser(
+                root_hostname,
+                on_log,
+                on_found,
+                should_stop,
+            )
+
         discovered_items: list[DiscoveredPowerPoint] = []
         visited_pages: set[str] = set()
         seen_download_urls: set[str] = set()
-        self._browser_processed_pages.clear()
 
         queue: collections.deque[tuple[str, int]] = collections.deque([(self.target_url, 0)])
 

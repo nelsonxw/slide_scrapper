@@ -21,6 +21,7 @@ export const ScrapeForm: React.FC<ScrapeFormProps> = ({ onScrapeComplete, onNavi
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [activeTask, setActiveTask] = useState<ScrapeTaskStatus | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [logsCopied, setLogsCopied] = useState(false);
 
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -80,6 +81,17 @@ export const ScrapeForm: React.FC<ScrapeFormProps> = ({ onScrapeComplete, onNavi
       setActiveTask((prev) => (prev ? { ...prev, status: 'cancelling', current_step: 'Cancelling task...' } : null));
     } catch (err: any) {
       console.error('Failed to cancel task:', err);
+    }
+  };
+
+  const handleCopyLogs = async () => {
+    if (!activeTask?.logs.length) return;
+    try {
+      await navigator.clipboard.writeText(activeTask.logs.join('\\n'));
+      setLogsCopied(true);
+      window.setTimeout(() => setLogsCopied(false), 1600);
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? `Unable to copy logs: ${err.message}` : 'Unable to copy logs.');
     }
   };
 
@@ -419,11 +431,31 @@ export const ScrapeForm: React.FC<ScrapeFormProps> = ({ onScrapeComplete, onNavi
 
           {/* Terminal Console Logs */}
           <div>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px', gap: '12px' }}>
               <span style={{ fontSize: '12px', fontWeight: '700', color: 'var(--slate-600)' }}>Live Pipeline Logs</span>
-              <span style={{ fontSize: '11px', color: 'var(--slate-400)', fontFamily: 'JetBrains Mono, monospace' }}>
-                {activeTask.logs.length} events
-              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span style={{ fontSize: '11px', color: 'var(--slate-400)', fontFamily: 'JetBrains Mono, monospace' }}>
+                  {activeTask.logs.length} events
+                </span>
+                <button
+                  type="button"
+                  onClick={handleCopyLogs}
+                  disabled={!activeTask.logs.length}
+                  style={{
+                    background: '#ffffff',
+                    color: 'var(--slate-700)',
+                    border: '1px solid var(--slate-300)',
+                    borderRadius: 'var(--radius-sm)',
+                    padding: '5px 10px',
+                    fontSize: '11px',
+                    fontWeight: 700,
+                    cursor: activeTask.logs.length ? 'pointer' : 'not-allowed',
+                    opacity: activeTask.logs.length ? 1 : 0.6,
+                  }}
+                >
+                  {logsCopied ? 'Copied' : 'Copy logs'}
+                </button>
+              </div>
             </div>
             <div
               className="terminal-scroll"

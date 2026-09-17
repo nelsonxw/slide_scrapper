@@ -1,5 +1,6 @@
 """Tests for generic target-site crawling and download control detection."""
 import unittest
+from unittest.mock import Mock
 
 import httpx
 from bs4 import BeautifulSoup
@@ -123,6 +124,34 @@ class TestCrawlerDetection(unittest.TestCase):
             request = client.build_request("GET", "https://example.com/catalog")
 
         self.assertIn("session=authenticated", request.headers["Cookie"])
+
+    def test_extracts_download_candidate_from_rendered_html(self):
+        soup = BeautifulSoup(
+            '<form action="/download/"><input type="submit" value="Download PowerPoint"></form>',
+            "html.parser",
+        )
+        candidates = self.scraper._extract_download_candidates(soup, "https://example.com/template/")
+
+        self.assertEqual(
+            [candidate[0] for candidate in candidates],
+            ["https://example.com/download/", "https://example.com/download/"],
+        )
+        self.assertEqual({candidate[1] for candidate in candidates}, {"Presentation"})
+
+    def test_captures_page_storage_without_exposing_values(self):
+        page = Mock()
+        page.evaluate.side_effect = [
+            "https://example.com",
+            {"access_token": "secret"},
+            {"csrf": "nonce"},
+        ]
+
+        storage = BrowserDownloader().capture_page_storage(page)
+
+        self.assertEqual(storage["origin"], "https://example.com")
+        self.assertEqual(storage["local"], {"access_token": "secret"})
+        self.assertEqual(storage["session"], {"csrf": "nonce"})
+        self.assertEqual(page.evaluate.call_count, 3)
 
 
 if __name__ == "__main__":

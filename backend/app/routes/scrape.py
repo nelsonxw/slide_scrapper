@@ -97,7 +97,13 @@ def _run_scrape_pipeline(
         try:
             if browser_session_was_open:
                 session_cookies = browser_session.get_live_session_cookies()
+                live_storage = browser_session.get_live_session_storage()
                 log(f"Loaded {len(session_cookies)} cookies from the live Chrome CDP session (values hidden).")
+                log(
+                    "Loaded live browser storage: "
+                    f"localStorage={len(live_storage.get('local', {}))}, "
+                    f"sessionStorage={len(live_storage.get('session', {}))}."
+                )
             else:
                 session_cookies = []
                 log("Dedicated Chrome is not open; no authenticated session available.")
