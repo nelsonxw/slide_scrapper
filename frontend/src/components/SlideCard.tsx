@@ -17,6 +17,15 @@ export const SlideCard: React.FC<SlideCardProps> = ({
 }) => {
   const [imgError, setImgError] = useState(false);
 
+  // Ensure preview URL is properly formatted for the dev server proxy
+  const getPreviewUrl = () => {
+    if (slide.preview_url.startsWith('http')) {
+      return slide.preview_url;
+    }
+    // The webpack dev server proxies /api to the backend
+    return slide.preview_url.startsWith('/api') ? slide.preview_url : `/api${slide.preview_url}`;
+  };
+
   const formatBytes = (bytes: number) => {
     if (bytes === 0) return '0 KB';
     const k = 1024;
@@ -51,7 +60,7 @@ export const SlideCard: React.FC<SlideCardProps> = ({
       >
         {!imgError ? (
           <img
-            src={slide.preview_url}
+            src={getPreviewUrl()}
             alt={slide.title}
             onError={() => setImgError(true)}
             style={{

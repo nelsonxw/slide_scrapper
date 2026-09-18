@@ -31,28 +31,31 @@ def render_slide_preview(pptx_path: Path | str, slide_index: int, output_png_pat
 
             pythoncom.CoInitialize()
             try:
-                ppt_app = win32com.client.Dispatch("PowerPoint.Application")
-                # Open in hidden/read-only mode without window
-                presentation = ppt_app.Presentations.Open(
-                    str(pptx_path),
-                    ReadOnly=True,
-                    Untitled=False,
-                    WithWindow=False,
-                )
+                # Use dynamic dispatch for better compatibility
+                ppt_app = win32com.client.dynamic.Dispatch("PowerPoint.Application")
+                # Make PowerPoint visible for debugging
+                ppt_app.Visible = True
+                # Use absolute paths and ensure they exist
+                abs_pptx_path = str(pptx_path.absolute())
+                abs_output_path = str(output_png_path.absolute())
+                # Try opening with minimal parameters
+                presentation = ppt_app.Presentations.Open(abs_pptx_path)
                 try:
                     # PowerPoint slide index is 1-based in COM
                     com_slide_idx = slide_index + 1
                     if 1 <= com_slide_idx <= presentation.Slides.Count:
                         slide = presentation.Slides(com_slide_idx)
-                        slide.Export(str(output_png_path), "PNG", 1280, 720)
+                        slide.Export(abs_output_path, "PNG")
                         if output_png_path.exists() and output_png_path.stat().st_size > 0:
                             return output_png_path
                 finally:
                     presentation.Close()
+                    ppt_app.Visible = False
             finally:
                 pythoncom.CoUninitialize()
         except Exception as com_err:
             # Fall back to PIL renderer
+            print(f"PowerPoint COM rendering failed: {com_err}")
             pass
 
     # PIL Fallback Renderer
@@ -73,6 +76,8 @@ def _render_pil_fallback(pptx_path: Path, slide_index: int, output_png_path: Pat
     title_text = f"Slide {slide_index + 1}"
     body_texts: list[str] = []
     shape_count = 0
+    has_chart = False
+    has_image = False
 
     try:
         prs = pptx.Presentation(str(pptx_path))
@@ -80,16 +85,28 @@ def _render_pil_fallback(pptx_path: Path, slide_index: int, output_png_path: Pat
             slide = prs.slides[slide_index]
             shape_count = len(slide.shapes)
             for shape in slide.shapes:
-                if shape.has_text_frame:
-                    text = shape.text_frame.text.strip()
-                    if text:
-                        if not title_text or title_text == f"Slide {slide_index + 1}":
-                            title_text = text.split("\n")[0][:80]
-                        else:
-                            for line in text.split("\n"):
-                                if line.strip() and len(body_texts) < 6:
-                                    body_texts.append(line.strip()[:100])
-    except Exception:
+                # Check for different shape types
+                if hasattr(shape, 'shape_type'):
+                    if shape.shape_type == 3:  # Chart
+                        has_chart = True
+                    elif shape.shape_type == 13:  # Picture
+                        has_image = True
+                
+                # Extract text content
+                try:
+                    if hasattr(shape, 'has_text_frame') and shape.has_text_frame:
+                        text = shape.text_frame.text.strip()
+                        if text:
+                            if not title_text or title_text == f"Slide {slide_index + 1}":
+                                title_text = text.split("\n")[0][:80]
+                            else:
+                                for line in text.split("\n"):
+                                    if line.strip() and len(body_texts) < 8:
+                                        body_texts.append(line.strip()[:100])
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"Error extracting slide content: {e}")
         pass
 
     # Try to load a font, or use default
@@ -132,8 +149,21 @@ def _render_pil_fallback(pptx_path: Path, slide_index: int, output_png_path: Pat
         draw.text((120, y_pos), f"•  {line}", fill=(71, 85, 105), font=font_body)
         y_pos += 45
 
+    # Add visual indicators for charts/images
+    if has_chart:
+        draw.text((120, y_pos + 10), "📊 Contains Chart/Data", fill=(6, 114, 203), font=font_body)
+        y_pos += 45
+    if has_image:
+        draw.text((120, y_pos + 10), "🖼️ Contains Image", fill=(6, 114, 203), font=font_body)
+        y_pos += 45
+
     # Footer Metadata
-    meta_text = f"PowerPoint Slide #{slide_index + 1}  •  {shape_count} Shapes"
+    meta_parts = [f"PowerPoint Slide #{slide_index + 1}", f"{shape_count} Elements"]
+    if has_chart:
+        meta_parts.append("Chart")
+    if has_image:
+        meta_parts.append("Image")
+    meta_text = "  •  ".join(meta_parts)
     draw.text((100, height - 110), meta_text, fill=(148, 163, 184), font=font_meta)
 
     img.save(str(output_png_path), "PNG", quality=95)

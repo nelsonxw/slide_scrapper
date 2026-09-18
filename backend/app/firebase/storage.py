@@ -160,6 +160,8 @@ class FirebaseStorageService:
 
             pptx_url = self._get_blob_url(pptx_blob, storage_pptx_path)
             preview_url = self._get_blob_url(preview_blob, storage_preview_path)
+            if preview_blob.size is None or preview_blob.size == 0:
+                preview_url = f"/api/slides/preview/local/{preview_filename}"
         else:
             # Local fallback mode when Firebase credentials are not yet configured
             pptx_url = f"/api/slides/download/local/{slide_filename}"
@@ -213,6 +215,8 @@ class FirebaseStorageService:
 
                     pptx_url = self._get_blob_url(blob, storage_path)
                     preview_url = self._get_blob_url(preview_blob, preview_path)
+                    if preview_blob.size is None or preview_blob.size == 0:
+                        preview_url = f"/api/slides/preview/local/{filename.replace('.pptx', '.png')}"
 
                     slide_idx = int(meta.get("slide_index", 0)) if meta.get("slide_index") else 0
                     tot_slides = int(meta.get("total_slides", 1)) if meta.get("total_slides") else 1
