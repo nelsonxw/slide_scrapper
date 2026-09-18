@@ -15,6 +15,7 @@ from typing import Any
 import firebase_admin
 from firebase_admin import credentials, storage
 from google.cloud.storage.blob import Blob
+import urllib3
 
 from app.config import settings
 
@@ -83,6 +84,7 @@ class FirebaseStorageService:
                 self.app = firebase_admin.get_app()
 
             self.bucket = storage.bucket(self.bucket_name, app=self.app)
+            self._configure_client_ssl()
             self.is_connected = True
             self.connection_error = None
         except Exception as e:
@@ -90,12 +92,31 @@ class FirebaseStorageService:
             self.connection_error = str(e)
             print(f"Warning: Firebase Storage init notice ({self.bucket_name}): {e}")
 
+    def _configure_client_ssl(self):
+        """Configures SSL verification on the Google Cloud Storage client sessions."""
+        if not self.bucket or not hasattr(self.bucket, 'client'):
+            return
+
+        client = self.bucket.client
+        verify_value = settings.firebase_ca_bundle if settings.firebase_ca_bundle else settings.firebase_verify_ssl
+
+        if not settings.firebase_verify_ssl:
+            urllib3.disable_warnings()
+
+        if hasattr(client, '_http') and client._http:
+            client._http.verify = verify_value
+
+        if hasattr(client, '_connection') and hasattr(client._connection, 'http') and client._connection.http:
+            client._connection.http.verify = verify_value
+
     def get_status(self) -> dict[str, Any]:
         return {
             "bucket_name": self.bucket_name,
             "is_connected": self.is_connected,
             "credentials_found": bool(settings.resolve_credentials_path()),
             "credentials_path": str(settings.resolve_credentials_path() or settings.credentials_path),
+            "firebase_verify_ssl": settings.firebase_verify_ssl,
+            "firebase_ca_bundle": settings.firebase_ca_bundle,
             "error": self.connection_error,
         }
 

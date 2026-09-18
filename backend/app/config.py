@@ -23,6 +23,8 @@ else:
 class Settings(BaseModel):
     storage_bucket: str = os.getenv("FIREBASE_STORAGE_BUCKET", "slide-preview.firebasestorage.app")
     credentials_path: str = os.getenv("FIREBASE_CREDENTIALS_PATH", "serviceAccountKey.json")
+    firebase_verify_ssl: bool = os.getenv("FIREBASE_VERIFY_SSL", "false").lower() in ("true", "1", "yes")
+    firebase_ca_bundle: str | None = os.getenv("FIREBASE_CA_BUNDLE")
     data_dir: Path = BASE_DIR / "data"
     host: str = os.getenv("HOST", "0.0.0.0")
     port: int = int(os.getenv("PORT", "8000"))
