@@ -34,6 +34,9 @@ class TestFirebaseStorage(unittest.TestCase):
 
                 self.assertEqual(card.slide_filename, "test_slide_1.pptx")
                 self.assertEqual(card.title, "Sample Title")
+                # In local fallback mode, public_pptx_url may be empty
+                if storage.is_connected:
+                    self.assertTrue(card.public_pptx_url)
 
                 # List slides
                 all_slides = storage.list_slides()

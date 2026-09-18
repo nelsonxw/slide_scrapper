@@ -32,13 +32,14 @@ class StoredSlideCard:
     storage_preview_path: str
     pptx_url: str
     preview_url: str
-    title: str
-    original_presentation_name: str
-    original_source_url: str
-    slide_index: int
-    total_slides: int
-    file_size: int
-    uploaded_at: str
+    public_pptx_url: str = ""
+    title: str = ""
+    original_presentation_name: str = ""
+    original_source_url: str = ""
+    slide_index: int = 0
+    total_slides: int = 1
+    file_size: int = 0
+    uploaded_at: str = ""
 
 
 class FirebaseStorageService:
@@ -180,13 +181,13 @@ class FirebaseStorageService:
                 pass
 
             pptx_url = self._get_blob_url(pptx_blob, storage_pptx_path)
+            public_pptx_url = self._get_public_blob_url(pptx_blob, storage_pptx_path)
             preview_url = self._get_blob_url(preview_blob, storage_preview_path)
-            if preview_blob.size is None or preview_blob.size == 0:
-                preview_url = f"/api/slides/preview/local/{preview_filename}"
         else:
             # Local fallback mode when Firebase credentials are not yet configured
             pptx_url = f"/api/slides/download/local/{slide_filename}"
             preview_url = f"/api/slides/preview/local/{preview_filename}"
+            public_pptx_url = ""
 
         card = StoredSlideCard(
             id=storage_pptx_path,
@@ -196,6 +197,7 @@ class FirebaseStorageService:
             storage_preview_path=storage_preview_path,
             pptx_url=pptx_url,
             preview_url=preview_url,
+            public_pptx_url=public_pptx_url,
             title=slide_title,
             original_presentation_name=original_presentation_name,
             original_source_url=original_source_url,
@@ -211,16 +213,11 @@ class FirebaseStorageService:
 
     def list_slides(self) -> list[StoredSlideCard]:
         """
-        Lists all slide records from Firebase Storage and local registry.
+        Lists all slide records from Firebase Storage.
+        Always fetches directly from Firebase Storage when connected, never from local drives.
         """
         slides_map: dict[str, StoredSlideCard] = {}
 
-        # 1. Read from local storage index
-        local_cards = self._read_local_card_index()
-        for c in local_cards:
-            slides_map[c.storage_pptx_path] = c
-
-        # 2. Sync from Firebase Storage if connected
         if self.is_connected and self.bucket:
             try:
                 blobs: Iterable[Blob] = self.bucket.list_blobs(prefix="slides/")
@@ -230,14 +227,13 @@ class FirebaseStorageService:
                     storage_path = blob.name
                     filename = storage_path.split("/")[-1]
                     preview_path = f"previews/{filename.replace('.pptx', '.png')}"
-                    
+
                     meta = blob.metadata or {}
                     preview_blob = self.bucket.blob(preview_path)
 
                     pptx_url = self._get_blob_url(blob, storage_path)
+                    public_pptx_url = self._get_public_blob_url(blob, storage_path)
                     preview_url = self._get_blob_url(preview_blob, preview_path)
-                    if preview_blob.size is None or preview_blob.size == 0:
-                        preview_url = f"/api/slides/preview/local/{filename.replace('.pptx', '.png')}"
 
                     slide_idx = int(meta.get("slide_index", 0)) if meta.get("slide_index") else 0
                     tot_slides = int(meta.get("total_slides", 1)) if meta.get("total_slides") else 1
@@ -250,6 +246,7 @@ class FirebaseStorageService:
                         storage_preview_path=preview_path,
                         pptx_url=pptx_url,
                         preview_url=preview_url,
+                        public_pptx_url=public_pptx_url,
                         title=meta.get("title", filename.replace(".pptx", "").replace("_", " ").title()),
                         original_presentation_name=meta.get("original_presentation_name", "Presentation"),
                         original_source_url=meta.get("original_source_url", ""),
@@ -261,6 +258,11 @@ class FirebaseStorageService:
                     slides_map[storage_path] = card
             except Exception as e:
                 print(f"Error querying Firebase Storage: {e}")
+        else:
+            # Fallback only when not connected to Firebase
+            local_cards = self._read_local_card_index()
+            for c in local_cards:
+                slides_map[c.storage_pptx_path] = c
 
         # Return sorted by upload date descending
         result = list(slides_map.values())
@@ -336,6 +338,10 @@ class FirebaseStorageService:
             return f"/api/slides/preview/storage/{path}"
         return f"/api/slides/download/storage/{path}"
 
+    def _get_public_blob_url(self, blob: Blob | None, path: str) -> str:
+        """Returns the public HTTPS URL directly on Firebase Storage for external services like Office Online Viewer."""
+        return f"https://storage.googleapis.com/{self.bucket_name}/{path}"
+
     def _get_index_file(self) -> Path:
         return settings.data_dir / "slides_index.json"
 
@@ -348,7 +354,13 @@ class FirebaseStorageService:
             if self.is_connected:
                 for card in cards:
                     card.pptx_url = self._get_blob_url(None, card.storage_pptx_path)
+                    card.public_pptx_url = self._get_public_blob_url(None, card.storage_pptx_path)
                     card.preview_url = self._get_blob_url(None, card.storage_preview_path)
+            else:
+                # Fallback for cards without public_pptx_url (old format)
+                for card in cards:
+                    if not hasattr(card, 'public_pptx_url') or not card.public_pptx_url:
+                        card.public_pptx_url = card.pptx_url
             return cards
         except Exception:
             return []

@@ -31,26 +31,21 @@ def render_slide_preview(pptx_path: Path | str, slide_index: int, output_png_pat
 
             pythoncom.CoInitialize()
             try:
-                # Use dynamic dispatch for better compatibility
-                ppt_app = win32com.client.dynamic.Dispatch("PowerPoint.Application")
-                # Make PowerPoint visible for debugging
-                ppt_app.Visible = True
-                # Use absolute paths and ensure they exist
-                abs_pptx_path = str(pptx_path.absolute())
-                abs_output_path = str(output_png_path.absolute())
-                # Try opening with minimal parameters
-                presentation = ppt_app.Presentations.Open(abs_pptx_path)
+                ppt_app = win32com.client.Dispatch("PowerPoint.Application")
+                abs_pptx_path = str(pptx_path)
+                abs_output_path = str(output_png_path)
+                # Open read-only, untitled=False, with_window=False
+                presentation = ppt_app.Presentations.Open(abs_pptx_path, True, False, False)
                 try:
                     # PowerPoint slide index is 1-based in COM
                     com_slide_idx = slide_index + 1
                     if 1 <= com_slide_idx <= presentation.Slides.Count:
                         slide = presentation.Slides(com_slide_idx)
-                        slide.Export(abs_output_path, "PNG")
+                        slide.Export(abs_output_path, "PNG", 1280, 720)
                         if output_png_path.exists() and output_png_path.stat().st_size > 0:
                             return output_png_path
                 finally:
                     presentation.Close()
-                    ppt_app.Visible = False
             finally:
                 pythoncom.CoUninitialize()
         except Exception as com_err:

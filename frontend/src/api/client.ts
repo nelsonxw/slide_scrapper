@@ -27,6 +27,7 @@ export interface StoredSlideCard {
   storage_preview_path: string;
   pptx_url: string;
   preview_url: string;
+  public_pptx_url: string;
   title: string;
   original_presentation_name: string;
   original_source_url: string;
