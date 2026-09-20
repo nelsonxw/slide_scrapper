@@ -65,6 +65,7 @@ export const api = {
     url: string;
     max_pages?: number;
     max_depth?: number;
+    enable_pagination?: boolean;
   }): Promise<ScrapeTaskStatus> {
     const res = await fetch(`${API_BASE}/scrape/start`, {
       method: 'POST',
@@ -73,6 +74,7 @@ export const api = {
         url: params.url,
         max_pages: params.max_pages ?? 25,
         max_depth: params.max_depth ?? 2,
+        enable_pagination: params.enable_pagination ?? true,
       }),
     });
     if (!res.ok) {

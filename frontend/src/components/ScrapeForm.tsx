@@ -16,8 +16,8 @@ const PRESET_URLS = [
 
 export const ScrapeForm: React.FC<ScrapeFormProps> = ({ onScrapeComplete, onNavigateToGallery }) => {
   const [url, setUrl] = useState('');
-  const [maxPages, setMaxPages] = useState(50);
-  const [maxDepth, setMaxDepth] = useState(2);
+  const [maxPages, setMaxPages] = useState(100);
+  const [maxDepth, setMaxDepth] = useState(3);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [activeTask, setActiveTask] = useState<ScrapeTaskStatus | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -65,6 +65,7 @@ export const ScrapeForm: React.FC<ScrapeFormProps> = ({ onScrapeComplete, onNavi
         url: url.trim(),
         max_pages: maxPages,
         max_depth: maxDepth,
+        enable_pagination: true,
       });
       setActiveTask(task);
     } catch (err: any) {
@@ -277,7 +278,7 @@ export const ScrapeForm: React.FC<ScrapeFormProps> = ({ onScrapeComplete, onNavi
               <input
                 type="range"
                 min={50}
-                max={1000}
+                max={10000}
                 step={50}
                 value={maxPages}
                 onChange={(e) => setMaxPages(Number(e.target.value))}
@@ -299,7 +300,7 @@ export const ScrapeForm: React.FC<ScrapeFormProps> = ({ onScrapeComplete, onNavi
               <input
                 type="range"
                 min={0}
-                max={4}
+                max={10}
                 value={maxDepth}
                 onChange={(e) => setMaxDepth(Number(e.target.value))}
                 disabled={Boolean(isRunning)}

@@ -284,8 +284,8 @@ class BrowserDownloader:
             )
             try:
                 page = context.new_page()
-                page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(2000)
+                page.goto(target_url, wait_until="domcontentloaded", timeout=10000)
+                page.wait_for_timeout(500)
                 page_is_not_gated = not self._page_requires_authentication(page)
                 current_cookies = context.cookies()
                 has_authentication_cookies = self.has_authentication_cookies(current_cookies)
@@ -328,8 +328,8 @@ class BrowserDownloader:
                 raise RuntimeError("No open page was found in the dedicated Chrome session")
 
             page = pages[0]
-            page.goto(target_url, wait_until="domcontentloaded", timeout=60000)
-            page.wait_for_timeout(2000)
+            page.goto(target_url, wait_until="domcontentloaded", timeout=10000)
+            page.wait_for_timeout(500)
             page_is_not_gated = not self._page_requires_authentication(page)
             cookies = browser.contexts[0].cookies()
             has_authentication_cookies = self.has_authentication_cookies(cookies)
@@ -544,7 +544,7 @@ class BrowserDownloader:
         page: Page,
         url: str,
         log: Callable[[str], None] | None = None,
-        timeout_sec: int = 20,
+        timeout_sec: int = 5,
     ) -> tuple[str, bytes] | None:
         """Downloads a presentation using an already-connected live CDP page."""
         def _log(message: str):
@@ -633,7 +633,7 @@ class BrowserDownloader:
         self,
         url: str,
         log: Callable[[str], None] | None = None,
-        timeout_sec: int = 20,
+        timeout_sec: int = 5,
         session_cookies: list[dict[str, object]] | dict[str, str] | None = None,
         session_cookie_domain: str | None = None,
     ) -> tuple[str, bytes] | None:

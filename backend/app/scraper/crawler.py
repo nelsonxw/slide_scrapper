@@ -40,6 +40,7 @@ class SiteScraper:
         custom_headers: dict[str, str] | None = None,
         use_browser: bool = True,
         browser_driver: BrowserDownloader | None = None,
+        enable_pagination: bool = True,
     ):
         self.target_url = target_url.strip()
         if not self.target_url.startswith(("http://", "https://")):
@@ -48,6 +49,7 @@ class SiteScraper:
         self.max_crawl_pages = max_crawl_pages
         self.max_depth = max_depth
         self.use_browser = use_browser
+        self.enable_pagination = enable_pagination
         self.browser_driver = browser_driver or BrowserDownloader()
         self._browser_processed_pages: set[str] = set()
         self.headers = {
@@ -232,13 +234,61 @@ class SiteScraper:
             candidates.append((matched_url, self._extract_title_from_url(matched_url)))
         return candidates
 
+    def _is_pagination_link(self, url: str, current_url: str) -> bool:
+        """
+        Detects if a URL is a pagination link based on common patterns.
+        Returns True if the URL appears to be a pagination link.
+        """
+        url_lower = url.lower()
+        current_lower = current_url.lower()
+        
+        # Common pagination patterns
+        pagination_patterns = [
+            r'/page/\d+',           # /page/2/, /page/3/
+            r'/page-\d+',           # /page-2, /page-3
+            r'[?&]page=\d+',        # ?page=2, &page=3
+            r'[?&]p=\d+',           # ?p=2, &p=3
+            r'[?&]offset=\d+',      # ?offset=20
+            r'[?&]start=\d+',       # ?start=20
+            r'/p\d+',               # /p2, /p3
+            r'/pg\d+',              # /pg2, /pg3
+        ]
+        
+        for pattern in pagination_patterns:
+            if re.search(pattern, url_lower):
+                return True
+        
+        # Check for next/prev buttons in same path structure
+        parsed_current = urlparse(current_lower)
+        parsed_url = urlparse(url_lower)
+        
+        # Same domain and similar path structure
+        if (parsed_current.hostname == parsed_url.hostname and 
+            parsed_url.path.startswith(parsed_current.path.rstrip('/'))):
+            # Check if it adds a pagination component
+            current_path_parts = parsed_current.path.rstrip('/').split('/')
+            url_path_parts = parsed_url.path.rstrip('/').split('/')
+            
+            # If URL has exactly one more path segment that looks like a number
+            if (len(url_path_parts) == len(current_path_parts) + 1 and
+                url_path_parts[-1].isdigit()):
+                return True
+        
+        return False
+
     def _extract_internal_links(
         self,
         soup: BeautifulSoup,
         current_url: str,
         root_hostname: str,
-    ) -> list[str]:
-        links: list[str] = []
+    ) -> tuple[list[str], list[str]]:
+        """
+        Extracts internal links from a page, separating pagination links from regular links.
+        Returns (regular_links, pagination_links).
+        """
+        regular_links: list[str] = []
+        pagination_links: list[str] = []
+        
         for anchor in soup.find_all("a", href=True):
             href = anchor["href"].strip()
             if not href or href.startswith(("javascript:", "mailto:", "tel:", "#")):
@@ -254,8 +304,14 @@ class SiteScraper:
                 (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".pdf", ".zip", ".css", ".js", ".mp4", ".mp3", ".json", ".xml")
             ):
                 continue
-            links.append(sub_url)
-        return links
+            
+            # Separate pagination links from regular links if pagination is enabled
+            if self.enable_pagination and self._is_pagination_link(sub_url, current_url):
+                pagination_links.append(sub_url)
+            else:
+                regular_links.append(sub_url)
+        
+        return regular_links, pagination_links
 
     def _crawl_via_live_browser(
         self,
@@ -279,8 +335,8 @@ class SiteScraper:
 
             context = browser.contexts[0]
             page = context.pages[0] if context.pages else context.new_page()
-            page.set_default_timeout(20000)
-            page.set_default_navigation_timeout(30000)
+            page.set_default_timeout(5000)
+            page.set_default_navigation_timeout(10000)
             log("Active Chrome session detected. Crawling rendered pages through live CDP.")
 
             while queue and len(visited_pages) < self.max_crawl_pages:
@@ -296,7 +352,7 @@ class SiteScraper:
                 log(f"Crawling rendered page ({len(visited_pages)}/{self.max_crawl_pages}, depth={depth}): {current_url}")
 
                 try:
-                    page.goto(current_url, wait_until="domcontentloaded", timeout=30000)
+                    page.goto(current_url, wait_until="domcontentloaded", timeout=10000)
                     page.wait_for_timeout(500)
                     rendered_html = page.content()
                 except Exception as error:
@@ -323,7 +379,7 @@ class SiteScraper:
                             page,
                             page.url,
                             log=log,
-                            timeout_sec=30,
+                            timeout_sec=5,
                         )
                     except Exception as error:
                         log(f"Live browser download error on {page.url}: {error}")
@@ -343,7 +399,20 @@ class SiteScraper:
                             on_found(item)
 
                 if depth < self.max_depth:
-                    for sub_url in self._extract_internal_links(soup, page.url, root_hostname):
+                    regular_links, pagination_links = self._extract_internal_links(soup, page.url, root_hostname)
+                    
+                    if pagination_links:
+                        log(f"Found {len(pagination_links)} pagination links, prioritizing them")
+                    
+                    # Prioritize pagination links by adding them to the front of the queue
+                    for sub_url in pagination_links:
+                        clean_sub = sub_url.split("#")[0].rstrip("/")
+                        if clean_sub not in visited_pages:
+                            queue.appendleft((sub_url, depth))  # Keep same depth for pagination
+                            log(f"Prioritized pagination link: {sub_url}")
+                    
+                    # Add regular links to the back of the queue
+                    for sub_url in regular_links:
                         clean_sub = sub_url.split("#")[0].rstrip("/")
                         if clean_sub not in visited_pages:
                             queue.append((sub_url, depth + 1))
@@ -395,7 +464,7 @@ class SiteScraper:
 
         with httpx.Client(
             headers=self.headers,
-            timeout=20.0,
+            timeout=5.0,
             follow_redirects=True,
             verify=False,
         ) as client:
@@ -510,27 +579,23 @@ class SiteScraper:
 
                 # 2. Queue internal sub-pages for crawling
                 if depth < self.max_depth:
-                    for a in soup.find_all("a", href=True):
-                        href = a["href"].strip()
-                        if not href or href.startswith(("javascript:", "mailto:", "tel:", "#")):
-                            continue
-                        sub_url = urljoin(current_url, href)
-                        parsed_sub = urlparse(sub_url)
-
-                        # Crawl only the target host and its subdomains.
-                        sub_hostname = (parsed_sub.hostname or "").lower()
-                        same_site = sub_hostname == root_hostname or sub_hostname.endswith(f".{root_hostname}")
-                        if same_site and parsed_sub.scheme in {"http", "https"}:
-                            sub_path = parsed_sub.path.lower().rstrip("/")
-
-                            # Skip non-HTML static assets; other URLs are evaluated normally and
-                            # will be skipped if they do not contain a PowerPoint download control.
-                            if not sub_path.endswith(
-                                (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".pdf", ".zip", ".css", ".js", ".mp4", ".mp3", ".json", ".xml")
-                            ):
-                                clean_sub = sub_url.split("#")[0].rstrip("/")
-                                if clean_sub not in visited_pages:
-                                    queue.append((sub_url, depth + 1))
+                    regular_links, pagination_links = self._extract_internal_links(soup, current_url, root_hostname)
+                    
+                    if pagination_links:
+                        log(f"Found {len(pagination_links)} pagination links, prioritizing them")
+                    
+                    # Prioritize pagination links by adding them to the front of the queue
+                    for sub_url in pagination_links:
+                        clean_sub = sub_url.split("#")[0].rstrip("/")
+                        if clean_sub not in visited_pages:
+                            queue.appendleft((sub_url, depth))  # Keep same depth for pagination
+                            log(f"Prioritized pagination link: {sub_url}")
+                    
+                    # Add regular links to the back of the queue
+                    for sub_url in regular_links:
+                        clean_sub = sub_url.split("#")[0].rstrip("/")
+                        if clean_sub not in visited_pages:
+                            queue.append((sub_url, depth + 1))
 
         log(f"Crawling complete. Discovered {len(discovered_items)} valid PowerPoint presentations across {len(visited_pages)} pages.")
         return discovered_items
@@ -539,8 +604,8 @@ class SiteScraper:
         """Helper to fetch a URL safely using existing client or temporary client."""
         try:
             if client:
-                return client.get(url, headers=self.headers, timeout=20.0, follow_redirects=True)
-            with httpx.Client(headers=self.headers, timeout=20.0, follow_redirects=True, verify=False) as temp_client:
+                return client.get(url, headers=self.headers, timeout=5.0, follow_redirects=True)
+            with httpx.Client(headers=self.headers, timeout=5.0, follow_redirects=True, verify=False) as temp_client:
                 self._configure_client_cookies(temp_client)
                 return temp_client.get(url)
         except Exception:

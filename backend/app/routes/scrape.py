@@ -5,6 +5,7 @@ Handles starting scrape tasks, streaming progress logs, splitting slides, and up
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import datetime
 import threading
 import uuid
@@ -23,8 +24,9 @@ router = APIRouter(prefix="/api/scrape", tags=["Scraper"])
 
 class StartScrapeRequest(BaseModel):
     url: str = Field(..., description="Target website URL to scrape")
-    max_pages: int = Field(default=25, ge=1, le=1000, description="Max sub-pages to crawl")
-    max_depth: int = Field(default=2, ge=0, le=5, description="Max crawl depth (0 = target page only)")
+    max_pages: int = Field(default=25, ge=1, le=10000, description="Max sub-pages to crawl")
+    max_depth: int = Field(default=2, ge=0, le=10, description="Max crawl depth (0 = target page only)")
+    enable_pagination: bool = Field(default=True, description="Enable automatic pagination detection and following")
 
 
 class ScrapeTaskStatus(BaseModel):
@@ -68,6 +70,7 @@ def _run_scrape_pipeline(
     target_url: str,
     max_pages: int,
     max_depth: int,
+    enable_pagination: bool,
     stop_event: threading.Event,
 ):
     task = tasks[task_id]
@@ -87,9 +90,10 @@ def _run_scrape_pipeline(
     browser_session_was_open = False
 
     try:
-        log(f"Starting discovery on {target_url} (depth <= {max_depth}, max_pages <= {max_pages})")
         from app.scraper.browser_driver import BrowserDownloader
 
+        log(f"Starting discovery on {target_url} (depth <= {max_depth}, max_pages <= {max_pages})")
+        
         browser_session = BrowserDownloader()
         browser_session_was_open = browser_session.is_browser_open()
         if browser_session_was_open:
@@ -127,68 +131,41 @@ def _run_scrape_pipeline(
             max_depth=max_depth,
             cookies=session_cookies or None,
             browser_driver=browser_session,
+            enable_pagination=enable_pagination,
         )
 
         discovered_ppts: list[DiscoveredPowerPoint] = []
-
-        def on_found(item: DiscoveredPowerPoint):
-            discovered_ppts.append(item)
-            task["discovered_files_count"] = len(discovered_ppts)
-            log(f"Found PowerPoint presentation #{len(discovered_ppts)}: '{item.title}' ({len(item.content_bytes) // 1024} KB)")
-
-        scraper.crawl_and_extract(
-            on_log=log,
-            on_found=on_found,
-            should_stop=lambda: stop_event.is_set(),
-        )
-
-        if stop_event.is_set():
-            task["status"] = "cancelled"
-            task["current_step"] = "Scraping cancelled by user."
-            log("Task was cancelled.")
-            return
-
-        if not discovered_ppts:
-            _mark_scrape_history(target_url)
-            task["status"] = "completed"
-            task["current_step"] = "Finished: No PowerPoint files found."
-            log("No PowerPoint download buttons or files discovered on the target site.")
-            return
-
-        log(f"Discovery phase completed. Processing {len(discovered_ppts)} PowerPoint presentations for slide extraction...")
-        task["current_step"] = "Splitting presentations by slide..."
-
         total_slides = 0
         uploaded_slides = 0
         saved_cards = []
-
-        for idx, ppt in enumerate(discovered_ppts, start=1):
-            if stop_event.is_set():
-                break
-
-            log(f"Processing presentation {idx}/{len(discovered_ppts)}: '{ppt.title}'...")
-
-            # Split presentation into individual slides
-            split_dir = settings.data_dir / "split_slides"
-            split_dir.mkdir(parents=True, exist_ok=True)
-
+        
+        # Thread pool for parallel processing of discovered files
+        process_executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+        processing_futures = []
+        
+        def process_ppt_async(ppt: DiscoveredPowerPoint, ppt_index: int):
+            """Process a single PPT file (split and upload) in a separate thread."""
             try:
+                log(f"Processing presentation #{ppt_index}: '{ppt.title}'...")
+                
+                # Split presentation into individual slides
+                split_dir = settings.data_dir / "split_slides"
+                split_dir.mkdir(parents=True, exist_ok=True)
+
                 slide_results = split_presentation_by_slide(
                     pptx_source=ppt.content_bytes,
                     presentation_name=ppt.title,
                     output_dir=settings.data_dir,
                 )
                 log(f"Extracted {len(slide_results)} individual slides from '{ppt.title}'.")
-                total_slides += len(slide_results)
-                task["total_slides_created"] = total_slides
-
+                
+                cards = []
                 # Upload each slide to Firebase Storage
-                task["current_step"] = f"Uploading slides for '{ppt.title}' to Firebase Storage..."
                 for slide in slide_results:
                     if stop_event.is_set():
                         break
 
-                    log(f"Uploading slide {slide.slide_index + 1}/{slide.total_slides}: {slide.slide_filename} to Firebase Storage (gs://{settings.storage_bucket})...")
+                    log(f"Uploading slide {slide.slide_index + 1}/{slide.total_slides}: {slide.slide_filename} to Firebase Storage...")
                     try:
                         card = storage_service.upload_slide_file(
                             local_pptx_path=slide.pptx_file_path,
@@ -199,22 +176,73 @@ def _run_scrape_pipeline(
                             slide_index=slide.slide_index,
                             total_slides=slide.total_slides,
                         )
+                        cards.append({
+                            "id": card.id,
+                            "title": card.title,
+                            "slide_filename": card.slide_filename,
+                            "preview_url": card.preview_url,
+                            "pptx_url": card.pptx_url,
+                        })
                     except Exception as upload_error:
                         log(f"Firebase upload failed for {slide.slide_filename}: {upload_error}")
                         raise RuntimeError(f"Firebase upload failed for {slide.slide_filename}") from upload_error
-                    uploaded_slides += 1
-                    task["uploaded_slides_count"] = uploaded_slides
-                    saved_cards.append({
-                        "id": card.id,
-                        "title": card.title,
-                        "slide_filename": card.slide_filename,
-                        "preview_url": card.preview_url,
-                        "pptx_url": card.pptx_url,
-                    })
-
+                
+                return cards
             except Exception as processing_error:
                 log(f"Error processing '{ppt.title}': {processing_error}")
                 raise
+
+        def on_found(item: DiscoveredPowerPoint):
+            discovered_ppts.append(item)
+            task["discovered_files_count"] = len(discovered_ppts)
+            log(f"Found PowerPoint presentation #{len(discovered_ppts)}: '{item.title}' ({len(item.content_bytes) // 1024} KB)")
+            
+            # Start processing this PPT immediately in background
+            future = process_executor.submit(process_ppt_async, item, len(discovered_ppts))
+            processing_futures.append(future)
+
+        log(f"Starting discovery on {target_url} (depth <= {max_depth}, max_pages <= {max_pages})")
+        scraper.crawl_and_extract(
+            on_log=log,
+            on_found=on_found,
+            should_stop=lambda: stop_event.is_set(),
+        )
+
+        if stop_event.is_set():
+            task["status"] = "cancelled"
+            task["current_step"] = "Scraping cancelled by user."
+            log("Task was cancelled.")
+            process_executor.shutdown(wait=False)
+            return
+
+        if not discovered_ppts:
+            _mark_scrape_history(target_url)
+            task["status"] = "completed"
+            task["current_step"] = "Finished: No PowerPoint files found."
+            log("No PowerPoint download buttons or files discovered on the target site.")
+            process_executor.shutdown(wait=False)
+            return
+
+        log(f"Discovery phase completed. {len(discovered_ppts)} PowerPoint presentations found and processing started in parallel...")
+        task["current_step"] = "Processing presentations in parallel (splitting & uploading)..."
+
+        # Wait for all parallel processing to complete
+        for future in concurrent.futures.as_completed(processing_futures):
+            if stop_event.is_set():
+                break
+            try:
+                cards = future.result()
+                if cards:
+                    saved_cards.extend(cards)
+                    total_slides += len(cards)
+                    uploaded_slides += len(cards)
+                    task["total_slides_created"] = total_slides
+                    task["uploaded_slides_count"] = uploaded_slides
+            except Exception as e:
+                log(f"Error in parallel processing: {e}")
+
+        # Shutdown the executor
+        process_executor.shutdown(wait=True)
 
         task["saved_slides"] = saved_cards
         if stop_event.is_set():
@@ -233,6 +261,10 @@ def _run_scrape_pipeline(
         task["current_step"] = f"Failed with error: {e}"
         log(f"Critical error during task: {e}")
     finally:
+        # Ensure thread pool is shut down properly
+        if process_executor is not None:
+            process_executor.shutdown(wait=False)
+        
         if browser_session_was_open and browser_session is not None and browser_session.is_browser_open():
             log("Closing the dedicated Chrome session after scraping completed.")
             browser_session.close_browser_session()
@@ -297,6 +329,7 @@ def start_scrape_task(request: StartScrapeRequest):
             request.url.strip(),
             request.max_pages,
             request.max_depth,
+            request.enable_pagination,
             stop_event,
         ),
         daemon=True,
