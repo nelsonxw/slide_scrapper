@@ -66,6 +66,9 @@ export const api = {
     max_pages?: number;
     max_depth?: number;
     enable_pagination?: boolean;
+    consecutive_gate_threshold?: number;
+    consecutive_empty_threshold?: number;
+    test_mode?: boolean;
   }): Promise<ScrapeTaskStatus> {
     const res = await fetch(`${API_BASE}/scrape/start`, {
       method: 'POST',
@@ -75,6 +78,9 @@ export const api = {
         max_pages: params.max_pages ?? 25,
         max_depth: params.max_depth ?? 2,
         enable_pagination: params.enable_pagination ?? true,
+        consecutive_gate_threshold: params.consecutive_gate_threshold ?? 3,
+        consecutive_empty_threshold: params.consecutive_empty_threshold ?? 3,
+        test_mode: params.test_mode ?? false,
       }),
     });
     if (!res.ok) {

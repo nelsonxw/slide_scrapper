@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect } from 'react';
 import { StoredSlideCard } from '../api/client';
-import { IconX, IconDownload, IconTrash, IconExternalLink, IconCloud, IconEye, IconLayers } from './Icons';
+import { IconX, IconDownload, IconTrash, IconExternalLink, IconCloud } from './Icons';
 
 interface SlidePreviewModalProps {
   slide: StoredSlideCard | null;
@@ -13,8 +13,6 @@ export const SlidePreviewModal: React.FC<SlidePreviewModalProps> = ({
   onClose,
   onDeleteSingle,
 }) => {
-  const [viewMode, setViewMode] = useState<'image' | 'pptx'>('image');
-
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -23,14 +21,7 @@ export const SlidePreviewModal: React.FC<SlidePreviewModalProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [onClose]);
 
-  useEffect(() => {
-    setViewMode('image');
-  }, [slide?.id]);
-
   if (!slide) return null;
-
-  const pptxPublicUrl = slide.public_pptx_url || (slide.pptx_url.startsWith('http') ? slide.pptx_url : `${window.location.origin}${slide.pptx_url}`);
-  const officeViewerUrl = `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(pptxPublicUrl)}`;
 
   return (
     <div
@@ -86,52 +77,6 @@ export const SlidePreviewModal: React.FC<SlidePreviewModalProps> = ({
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
-            {/* View Mode Toggle */}
-            <div style={{ display: 'flex', background: 'var(--slate-100)', borderRadius: 'var(--radius-sm)', padding: '3px' }}>
-              <button
-                type="button"
-                onClick={() => setViewMode('pptx')}
-                style={{
-                  background: viewMode === 'pptx' ? '#ffffff' : 'transparent',
-                  color: viewMode === 'pptx' ? 'var(--slate-900)' : 'var(--slate-500)',
-                  border: 'none',
-                  padding: '5px 12px',
-                  borderRadius: 'var(--radius-sm)',
-                  fontSize: '12px',
-                  fontWeight: '600',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  boxShadow: viewMode === 'pptx' ? 'var(--shadow-sm)' : 'none',
-                }}
-              >
-                <IconEye size={14} />
-                <span>PowerPoint</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setViewMode('image')}
-                style={{
-                  background: viewMode === 'image' ? '#ffffff' : 'transparent',
-                  color: viewMode === 'image' ? 'var(--slate-900)' : 'var(--slate-500)',
-                  border: 'none',
-                  padding: '5px 12px',
-                  borderRadius: 'var(--radius-sm)',
-                  fontSize: '12px',
-                  fontWeight: '600',
-                  cursor: 'pointer',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '6px',
-                  boxShadow: viewMode === 'image' ? 'var(--shadow-sm)' : 'none',
-                }}
-              >
-                <IconLayers size={14} />
-                <span>Slide Image</span>
-              </button>
-            </div>
-
             <button
               type="button"
               onClick={onClose}
@@ -153,7 +98,7 @@ export const SlidePreviewModal: React.FC<SlidePreviewModalProps> = ({
           </div>
         </div>
 
-        {/* Modal Body: PowerPoint Viewer or Slide Image */}
+        {/* Modal Body: Slide Image */}
         <div
           style={{
             padding: '0',
@@ -168,77 +113,29 @@ export const SlidePreviewModal: React.FC<SlidePreviewModalProps> = ({
             minHeight: '480px',
           }}
         >
-          {viewMode === 'pptx' ? (
-            <>
-              <iframe
-                src={officeViewerUrl}
-                title="PowerPoint Viewer"
-                style={{
-                  width: '100%',
-                  height: '100%',
-                  border: 'none',
-                  flex: 1,
-                }}
-                sandbox="allow-scripts allow-same-origin allow-popups allow-forms allow-presentation"
-                allowFullScreen
-              />
-              <div
-                style={{
-                  padding: '8px 16px',
-                  background: 'rgba(15, 23, 42, 0.95)',
-                  width: '100%',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  borderTop: '1px solid rgba(255, 255, 255, 0.1)',
-                  fontSize: '12px',
-                  color: 'var(--slate-300)',
-                }}
-              >
-                <span>If PowerPoint Online shows a license error or is blocked by your network:</span>
-                <button
-                  type="button"
-                  onClick={() => setViewMode('image')}
-                  style={{
-                    background: 'var(--primary)',
-                    color: '#ffffff',
-                    border: 'none',
-                    padding: '4px 10px',
-                    borderRadius: 'var(--radius-sm)',
-                    fontSize: '11px',
-                    fontWeight: '600',
-                    cursor: 'pointer',
-                  }}
-                >
-                  View Slide Image Preview
-                </button>
-              </div>
-            </>
-          ) : (
-            <div
+          <div
+            style={{
+              padding: '24px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: '100%',
+              height: '100%',
+              overflow: 'auto',
+            }}
+          >
+            <img
+              src={slide.preview_url}
+              alt={slide.title}
               style={{
-                padding: '24px',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                width: '100%',
-                height: '100%',
-                overflow: 'auto',
+                maxWidth: '100%',
+                maxHeight: '65vh',
+                objectFit: 'contain',
+                borderRadius: 'var(--radius-sm)',
+                boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
               }}
-            >
-              <img
-                src={slide.preview_url}
-                alt={slide.title}
-                style={{
-                  maxWidth: '100%',
-                  maxHeight: '65vh',
-                  objectFit: 'contain',
-                  borderRadius: 'var(--radius-sm)',
-                  boxShadow: '0 8px 24px rgba(0,0,0,0.5)',
-                }}
-              />
-            </div>
-          )}
+            />
+          </div>
         </div>
 
         {/* Modal Footer: Metadata & Actions */}
@@ -285,48 +182,45 @@ export const SlidePreviewModal: React.FC<SlidePreviewModalProps> = ({
             <button
               type="button"
               onClick={() => {
-                if (confirm(`Delete slide '${slide.title}' from Firebase Storage?`)) {
-                  onDeleteSingle(slide.id);
-                  onClose();
-                }
+                onDeleteSingle(slide.id);
+                onClose();
               }}
               style={{
                 display: 'flex',
                 alignItems: 'center',
                 gap: '6px',
-                background: 'var(--danger-light)',
-                color: 'var(--danger-hover)',
-                border: '1px solid #fca5a5',
-                padding: '8px 14px',
-                borderRadius: 'var(--radius-md)',
+                padding: '8px 16px',
+                borderRadius: 'var(--radius-sm)',
                 fontSize: '13px',
-                fontWeight: '700',
+                fontWeight: '600',
                 cursor: 'pointer',
+                background: '#fee2e2',
+                color: '#dc2626',
+                border: '1px solid #fca5a5',
               }}
             >
-              <IconTrash size={16} />
+              <IconTrash size={14} />
               <span>Delete from Firebase</span>
             </button>
-
             <a
               href={slide.pptx_url}
               download={slide.slide_filename}
-              target="_blank"
-              rel="noreferrer"
               style={{
                 display: 'flex',
                 alignItems: 'center',
                 gap: '6px',
+                padding: '8px 16px',
+                borderRadius: 'var(--radius-sm)',
+                fontSize: '13px',
+                fontWeight: '600',
+                cursor: 'pointer',
                 background: 'var(--primary)',
                 color: '#ffffff',
                 textDecoration: 'none',
-                padding: '8px 18px',
-                borderRadius: 'var(--radius-md)',
-                fontSize: '13px',
-                fontWeight: '700',
+                border: 'none',
               }}
             >
-              <IconDownload size={16} />
+              <IconDownload size={14} />
               <span>Download .pptx</span>
             </a>
           </div>

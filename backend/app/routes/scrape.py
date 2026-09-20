@@ -27,6 +27,9 @@ class StartScrapeRequest(BaseModel):
     max_pages: int = Field(default=25, ge=1, le=10000, description="Max sub-pages to crawl")
     max_depth: int = Field(default=2, ge=0, le=10, description="Max crawl depth (0 = target page only)")
     enable_pagination: bool = Field(default=True, description="Enable automatic pagination detection and following")
+    consecutive_gate_threshold: int = Field(default=3, ge=1, le=10, description="Skip pagination after N consecutive gated pages")
+    consecutive_empty_threshold: int = Field(default=3, ge=1, le=10, description="Skip pagination after N consecutive empty pages (no files found)")
+    test_mode: bool = Field(default=False, description="Enable test mode with limited scope and detailed logging")
 
 
 class ScrapeTaskStatus(BaseModel):
@@ -71,6 +74,9 @@ def _run_scrape_pipeline(
     max_pages: int,
     max_depth: int,
     enable_pagination: bool,
+    consecutive_gate_threshold: int,
+    consecutive_empty_threshold: int,
+    test_mode: bool,
     stop_event: threading.Event,
 ):
     task = tasks[task_id]
@@ -81,9 +87,6 @@ def _run_scrape_pipeline(
     def log(msg: str):
         task["logs"].append(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}")
         task["updated_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        # Keep last 1000 logs
-        if len(task["logs"]) > 1000:
-            task["logs"] = task["logs"][-1000:]
 
     storage_service = FirebaseStorageService.get_instance()
     browser_session = None
@@ -125,14 +128,28 @@ def _run_scrape_pipeline(
             log("Authentication=false before crawling; no recognized authentication cookies were available.")
         task["current_step"] = "Crawling site & searching for download buttons..."
 
+        # Test mode: limit scope to specific URLs
+        if test_mode:
+            log("🧪 TEST MODE ENABLED: Limiting scope to base URL and page/2/")
+            max_pages = 10  # Limit pages for test
+            max_depth = 2   # Limit depth for test
+            # We'll handle pagination filtering in the crawler
+
         scraper = SiteScraper(
             target_url=target_url,
             max_crawl_pages=max_pages,
             max_depth=max_depth,
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
             cookies=session_cookies or None,
+            custom_headers=None,
             browser_driver=browser_session,
             enable_pagination=enable_pagination,
+            consecutive_gate_threshold=consecutive_gate_threshold,
+            consecutive_empty_threshold=consecutive_empty_threshold,
         )
+        
+        if test_mode:
+            scraper.enable_test_mode()
 
         discovered_ppts: list[DiscoveredPowerPoint] = []
         total_slides = 0
@@ -330,6 +347,9 @@ def start_scrape_task(request: StartScrapeRequest):
             request.max_pages,
             request.max_depth,
             request.enable_pagination,
+            request.consecutive_gate_threshold,
+            request.consecutive_empty_threshold,
+            request.test_mode,
             stop_event,
         ),
         daemon=True,

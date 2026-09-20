@@ -18,6 +18,9 @@ export const ScrapeForm: React.FC<ScrapeFormProps> = ({ onScrapeComplete, onNavi
   const [url, setUrl] = useState('');
   const [maxPages, setMaxPages] = useState(100);
   const [maxDepth, setMaxDepth] = useState(3);
+  const [consecutiveGateThreshold, setConsecutiveGateThreshold] = useState(3);
+  const [consecutiveEmptyThreshold, setConsecutiveEmptyThreshold] = useState(3);
+  const [testMode, setTestMode] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [activeTask, setActiveTask] = useState<ScrapeTaskStatus | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -46,13 +49,6 @@ export const ScrapeForm: React.FC<ScrapeFormProps> = ({ onScrapeComplete, onNavi
     return () => clearInterval(interval);
   }, [activeTask, onScrapeComplete]);
 
-  // Auto-scroll logs terminal to bottom
-  useEffect(() => {
-    if (logsEndRef.current) {
-      logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [activeTask?.logs]);
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!url.trim()) return;
@@ -66,6 +62,9 @@ export const ScrapeForm: React.FC<ScrapeFormProps> = ({ onScrapeComplete, onNavi
         max_pages: maxPages,
         max_depth: maxDepth,
         enable_pagination: true,
+        consecutive_gate_threshold: consecutiveGateThreshold,
+        consecutive_empty_threshold: consecutiveEmptyThreshold,
+        test_mode: testMode,
       });
       setActiveTask(task);
     } catch (err: any) {
@@ -309,6 +308,72 @@ export const ScrapeForm: React.FC<ScrapeFormProps> = ({ onScrapeComplete, onNavi
               <span style={{ fontSize: '11px', color: 'var(--slate-400)' }}>
                 {maxDepth === 0 ? 'Exclusively searches the target page' : 'Hierarchy depth of link navigation'}
               </span>
+            </div>
+
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+                <label style={{ fontSize: '12px', fontWeight: '700', color: 'var(--slate-700)' }}>
+                  Gate Skip Threshold
+                </label>
+                <span style={{ fontSize: '12px', fontWeight: '800', color: 'var(--primary)' }}>
+                  {consecutiveGateThreshold} pages
+                </span>
+              </div>
+              <input
+                type="range"
+                min={1}
+                max={10}
+                value={consecutiveGateThreshold}
+                onChange={(e) => setConsecutiveGateThreshold(Number(e.target.value))}
+                disabled={Boolean(isRunning)}
+                style={{ width: '100%', accentColor: 'var(--primary)', cursor: 'pointer' }}
+              />
+              <span style={{ fontSize: '11px', color: 'var(--slate-400)' }}>
+                Skip pagination after N consecutive gated pages
+              </span>
+            </div>
+
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+                <label style={{ fontSize: '12px', fontWeight: '700', color: 'var(--slate-700)' }}>
+                  Empty Page Threshold
+                </label>
+                <span style={{ fontSize: '12px', fontWeight: '800', color: 'var(--primary)' }}>
+                  {consecutiveEmptyThreshold} pages
+                </span>
+              </div>
+              <input
+                type="range"
+                min={1}
+                max={10}
+                value={consecutiveEmptyThreshold}
+                onChange={(e) => setConsecutiveEmptyThreshold(Number(e.target.value))}
+                disabled={Boolean(isRunning)}
+                style={{ width: '100%', accentColor: 'var(--primary)', cursor: 'pointer' }}
+              />
+              <span style={{ fontSize: '11px', color: 'var(--slate-400)' }}>
+                Skip pagination after N consecutive empty pages (no files found)
+              </span>
+            </div>
+
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
+                <label style={{ fontSize: '12px', fontWeight: '700', color: 'var(--slate-700)' }}>
+                  Test Mode
+                </label>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <input
+                  type="checkbox"
+                  checked={testMode}
+                  onChange={(e) => setTestMode(e.target.checked)}
+                  disabled={Boolean(isRunning)}
+                  style={{ accentColor: 'var(--primary)', cursor: 'pointer' }}
+                />
+                <span style={{ fontSize: '11px', color: 'var(--slate-400)' }}>
+                  Limit scope to base URL + page/2 with detailed logging
+                </span>
+              </div>
             </div>
           </div>
 

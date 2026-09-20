@@ -10,18 +10,18 @@ export const App: React.FC = () => {
   const [slideCount, setSlideCount] = useState<number>(0);
 
   const fetchStatusAndCount = async () => {
-    try {
-      const status = await api.getStorageStatus();
-      setStorageStatus(status);
-    } catch {
-      // Ignore
+    // Make API calls in parallel for faster loading
+    const [status, slides] = await Promise.allSettled([
+      api.getStorageStatus().catch(() => null),
+      api.getSlides().catch(() => []),
+    ]);
+
+    if (status.status === 'fulfilled' && status.value) {
+      setStorageStatus(status.value);
     }
 
-    try {
-      const slides = await api.getSlides();
-      setSlideCount(slides.length);
-    } catch {
-      // Ignore
+    if (slides.status === 'fulfilled' && slides.value) {
+      setSlideCount(slides.value.length);
     }
   };
 
