@@ -53,14 +53,17 @@ def test_pagination_link_extraction():
     """
     
     soup = BeautifulSoup(html, "html.parser")
-    regular_links, pagination_links = scraper._extract_internal_links(
+    regular_links, pagination_links, other_links = scraper._extract_internal_links(
         soup, 
         "https://slidemodel.com/free-powerpoint-templates/",
         "slidemodel.com"
     )
     
     assert len(pagination_links) == 2, f"Expected 2 pagination links, got {len(pagination_links)}"
-    assert len(regular_links) == 3, f"Expected 3 regular links, got {len(regular_links)}"
+    # Since current_url is within target section, regular_links contains only in-section links (template-1 and template-2)
+    # other_links contains out-of-section link (/about)
+    assert len(regular_links) == 2, f"Expected 2 in-section regular links, got {len(regular_links)}"
+    assert len(other_links) == 1, f"Expected 1 other link, got {len(other_links)}"
     
     # Check that pagination links are correctly identified
     assert any("page/2" in url for url in pagination_links), "Should contain page/2"

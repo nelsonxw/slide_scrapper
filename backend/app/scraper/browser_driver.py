@@ -253,7 +253,13 @@ class BrowserDownloader:
             "form[action*='download' i] input[type='submit']",
             "form[action*='download' i] button[type='submit']",
         )
-        return any(page.locator(selector).first.is_visible() for selector in selectors)
+        for selector in selectors:
+            try:
+                if page.locator(selector).first.is_visible(timeout=500):
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _page_requires_authentication(self, page: Page) -> bool:
         """Detects strong visible login gates without treating listing copy as a gate."""
@@ -578,18 +584,26 @@ class BrowserDownloader:
             _log("[Browser Automation] Gate markers were detected, but live authentication is present; continuing to inspect download controls.")
 
         download_selectors = [
-            "input[type='submit']", "button[type='submit']",
+            "button:has-text('Download')",
+            "button:has-text('PowerPoint')",
+            "button:has-text('PPTX')",
+            "a:has-text('Download PowerPoint')",
+            "a:has-text('Download PPTX')",
+            "a:has-text('Download')",
+            "a[href*='.pptx']",
+            "a[href*='.ppt']",
+            "a[href*='download']",
+            "[download]",
             "input[type='submit'][value*='Download' i]",
-            "button:has-text('Download')", "button:has-text('PowerPoint')",
-            "button:has-text('PPTX')", "a:has-text('Download PowerPoint')",
-            "a:has-text('Download PPTX')", "a:has-text('Download')",
-            "a[href*='.pptx']", "a[href*='.ppt']", "a[href*='download']", "[download]",
+            "button[type='submit'][value*='Download' i]",
+            "form[action*='download' i] input[type='submit']",
+            "form[action*='download' i] button[type='submit']",
         ]
         download_element = None
         for selector in download_selectors:
             try:
                 locator = page.locator(selector).first
-                if locator.is_visible():
+                if locator.is_visible(timeout=500):
                     download_element = locator
                     _log(f"[Browser Automation] Detected live download element: '{selector}'")
                     break
@@ -750,7 +764,7 @@ class BrowserDownloader:
                 for selector in download_selectors:
                     try:
                         locator = page.locator(selector).first
-                        if locator.is_visible():
+                        if locator.is_visible(timeout=500):
                             download_element = locator
                             _log(f"[Browser Automation] Detected download element: '{selector}'")
                             break

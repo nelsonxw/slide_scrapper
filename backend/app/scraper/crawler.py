@@ -421,10 +421,19 @@ class SiteScraper:
         
         return should_skip
 
+    def _strip_pagination_segments(self, u: str) -> str:
+        """Strips pagination numbers/segments to find base catalog section URL."""
+        u_clean = u.split('?')[0].split('#')[0].rstrip('/')
+        u_clean = re.sub(r'/page/\d+', '', u_clean, flags=re.IGNORECASE)
+        u_clean = re.sub(r'/page-\d+', '', u_clean, flags=re.IGNORECASE)
+        u_clean = re.sub(r'/p\d+$', '', u_clean, flags=re.IGNORECASE)
+        u_clean = re.sub(r'/pg\d+$', '', u_clean, flags=re.IGNORECASE)
+        return u_clean.rstrip('/')
+
     def _is_pagination_link(self, url: str, current_url: str) -> bool:
         """
         Detects if a URL is a pagination link based on common patterns.
-        Ensures the pagination link belongs to the same path sequence as current_url.
+        Ensures the pagination link belongs to the same path sequence as current_url or target_url.
         """
         url_lower = url.lower()
         current_lower = current_url.lower()
@@ -463,37 +472,23 @@ class SiteScraper:
             return False
 
         # Verify that the URL belongs to the same section/sequence as current_url or target_url
-        def _strip_pagination_segments(u: str) -> str:
-            u_clean = u.split('?')[0].split('#')[0].rstrip('/')
-            u_clean = re.sub(r'/page/\d+', '', u_clean, flags=re.IGNORECASE)
-            u_clean = re.sub(r'/page-\d+', '', u_clean, flags=re.IGNORECASE)
-            u_clean = re.sub(r'/p\d+$', '', u_clean, flags=re.IGNORECASE)
-            u_clean = re.sub(r'/pg\d+$', '', u_clean, flags=re.IGNORECASE)
-            return u_clean.rstrip('/')
+        url_base = self._strip_pagination_segments(url_lower)
+        current_base = self._strip_pagination_segments(current_lower)
+        target_base = self._strip_pagination_segments(self.target_url.lower())
 
-        url_base = _strip_pagination_segments(url_lower)
-        current_base = _strip_pagination_segments(current_lower)
-        target_base = _strip_pagination_segments(self.target_url.lower())
-
-        # Strict requirement: pagination link must be under the target path section
-        # Only accept pagination that is a direct child of the target URL's path
         parsed_tgt = urlparse(target_base)
         parsed_url = urlparse(url_base)
 
-        # Must be same domain
         if parsed_tgt.hostname != parsed_url.hostname:
             return False
 
-        # If target is root, accept any pagination on same domain
         if parsed_tgt.path in ('', '/'):
             return url_base == current_base
 
-        # Strict: pagination base must exactly match target base or current base
-        # This prevents /templates/page/2/ from being accepted when target is /free-powerpoint-templates/
+        # Belongs to target section or current section
         if url_base == target_base or url_base == current_base:
             return True
 
-        # Reject pagination from other sections
         return False
 
     def _extract_internal_links(
@@ -551,7 +546,7 @@ class SiteScraper:
             else:
                 regular_links.append(sub_url)
 
-        # Prioritize child links that match the target path section
+        # If target has a specific path (e.g. /free-powerpoint-templates), partition links
         target_path = urlparse(self.target_url).path.rstrip('/')
         if target_path and target_path != '/':
             target_prefix = target_path.lower()
@@ -563,9 +558,15 @@ class SiteScraper:
                     in_section_links.append(r_link)
                 else:
                     other_links.append(r_link)
-            regular_links = in_section_links + other_links
+            # If current_url is within target section, ONLY explore in-section links at this stage!
+            # other_links from header/footer are retained only if we are already outside target section.
+            current_path = urlparse(current_url).path.lower()
+            if current_path.startswith(target_prefix):
+                regular_links = in_section_links
+            else:
+                regular_links = in_section_links + other_links
         
-        return regular_links, pagination_links
+        return regular_links, pagination_links, other_links
 
     def _crawl_via_live_browser(
         self,
@@ -581,6 +582,8 @@ class SiteScraper:
         discovered_items: list[DiscoveredPowerPoint] = []
         pagination_queue: list[tuple[int, str]] = []
         enqueued_pagination_urls: set[str] = set()
+        external_section_urls: list[str] = []
+        enqueued_external_urls: set[str] = set()
 
         def enqueue_pagination_link(p_url: str):
             if not self.enable_pagination:
@@ -592,6 +595,12 @@ class SiteScraper:
                 pagination_queue.append((p_num, p_url))
                 pagination_queue.sort(key=lambda x: x[0])
                 log(f"Enqueued pagination page #{p_num}: {p_url}")
+
+        def enqueue_external_link(ext_url: str):
+            clean_ext = self._clean_url(ext_url)
+            if clean_ext not in enqueued_external_urls:
+                enqueued_external_urls.add(clean_ext)
+                external_section_urls.append(ext_url)
 
         enqueue_pagination_link(self.target_url)
 
@@ -641,7 +650,11 @@ class SiteScraper:
                     log(f"Gated page detected without authentication on {page.url}.")
 
                 candidates = self._extract_download_candidates(soup, page.url)
-                has_download_control = self.browser_driver.has_visible_download_control(page)
+                try:
+                    has_download_control = self.browser_driver.has_visible_download_control(page)
+                except Exception as e:
+                    log(f"Visibility check warning on {page.url}: {e}")
+                    has_download_control = False
 
                 files_saved_here = 0
                 if candidates and has_download_control and page.url not in self._browser_processed_pages and not was_gated:
@@ -671,9 +684,17 @@ class SiteScraper:
                         if on_found:
                             on_found(item)
 
-                regular_links, pagination_links = self._extract_internal_links(soup, page.url, root_hostname)
+                target_base = self._strip_pagination_segments(self.target_url.lower())
+                regular_links, pagination_links, other_links = self._extract_internal_links(soup, page.url, root_hostname)
                 for pag_url in pagination_links:
-                    enqueue_pagination_link(pag_url)
+                    pag_base = self._strip_pagination_segments(pag_url.lower())
+                    if pag_base == target_base:
+                        enqueue_pagination_link(pag_url)
+                    else:
+                        enqueue_external_link(pag_url)
+
+                for oth_url in other_links:
+                    enqueue_external_link(oth_url)
 
                 if files_saved_here > 0:
                     self.set_page_status(page_url, "not_empty")
@@ -710,8 +731,8 @@ class SiteScraper:
                     log(f"📊 STATUS: {page_url} is EMPTY (no files captured from page or linked pages)")
                     return False
 
+            # Phase 1: Explore target section pagination pages in order (Page 1, Page 2, Page 3, ...)
             consecutive_empty_pages = 0
-
             while pagination_queue and len(self.visited_urls) < self.max_crawl_pages:
                 if should_stop and should_stop():
                     log("Crawling stopped by user.")
@@ -732,8 +753,52 @@ class SiteScraper:
                     consecutive_empty_pages += 1
                     log(f"Pagination page #{page_num} is EMPTY ({consecutive_empty_pages}/{self.consecutive_empty_threshold}).")
                     if consecutive_empty_pages >= self.consecutive_empty_threshold:
-                        log(f"Reached {self.consecutive_empty_threshold} consecutive empty pagination pages. Skipping remaining pagination sequence.")
+                        log(f"Reached {self.consecutive_empty_threshold} consecutive empty pagination pages. Skipping remaining pagination sequence for target section.")
                         break
+
+            # Phase 2: Explore remaining external / secondary sections discovered from headers/menus
+            if external_section_urls and len(self.visited_urls) < self.max_crawl_pages and not (should_stop and should_stop()):
+                log(f"Target section exploration finished. Starting exploration of {len(external_section_urls)} other discovered sections...")
+                # Group secondary urls by base section
+                external_by_section: dict[str, list[tuple[int, str]]] = {}
+                for ext_url in external_section_urls:
+                    ext_base = self._strip_pagination_segments(ext_url.lower())
+                    if ext_base not in external_by_section:
+                        external_by_section[ext_base] = []
+                    p_num = self._extract_page_number(ext_url)
+                    external_by_section[ext_base].append((p_num, ext_url))
+
+                for section_base, sec_pages in external_by_section.items():
+                    if should_stop and should_stop():
+                        break
+                    if len(self.visited_urls) >= self.max_crawl_pages:
+                        break
+
+                    sec_pages.sort(key=lambda x: x[0])
+                    log(f"--- Exploring external section: {section_base} ({len(sec_pages)} pages) ---")
+                    sec_consecutive_empty = 0
+
+                    for p_num, sec_url in sec_pages:
+                        if should_stop and should_stop():
+                            break
+                        if len(self.visited_urls) >= self.max_crawl_pages:
+                            break
+
+                        clean_sec_url = self._clean_url(sec_url)
+                        if self.get_page_status(clean_sec_url) is not None:
+                            continue
+
+                        log(f"Processing external section page #{p_num}: {sec_url}")
+                        is_sec_not_empty = evaluate_live_page(sec_url, current_depth=0, max_depth_limit=self.max_depth)
+
+                        if is_sec_not_empty:
+                            sec_consecutive_empty = 0
+                        else:
+                            sec_consecutive_empty += 1
+                            log(f"External section {section_base} page #{p_num} is EMPTY ({sec_consecutive_empty}/{self.consecutive_empty_threshold}).")
+                            if sec_consecutive_empty >= self.consecutive_empty_threshold:
+                                log(f"Reached {self.consecutive_empty_threshold} consecutive empty pages for section {section_base}. Skipping rest of this section.")
+                                break
 
         log(f"Live browser crawl complete. Discovered {len(discovered_items)} valid PowerPoint presentations across {len(self.visited_urls)} pages.")
         return discovered_items
@@ -790,6 +855,8 @@ class SiteScraper:
         # Priority queue for pagination pages: list of (page_num, url)
         pagination_queue: list[tuple[int, str]] = []
         enqueued_pagination_urls: set[str] = set()
+        external_section_urls: list[str] = []
+        enqueued_external_urls: set[str] = set()
 
         def enqueue_pagination_link(p_url: str):
             if not self.enable_pagination:
@@ -801,6 +868,12 @@ class SiteScraper:
                 pagination_queue.append((p_num, p_url))
                 pagination_queue.sort(key=lambda x: x[0])
                 log(f"Enqueued pagination page #{p_num}: {p_url}")
+
+        def enqueue_external_link(ext_url: str):
+            clean_ext = self._clean_url(ext_url)
+            if clean_ext not in enqueued_external_urls:
+                enqueued_external_urls.add(clean_ext)
+                external_section_urls.append(ext_url)
 
         # Seed pagination queue with target URL
         enqueue_pagination_link(self.target_url)
@@ -895,9 +968,17 @@ class SiteScraper:
                             on_found(item)
 
                 # Extract internal links & pagination links
-                regular_links, pagination_links = self._extract_internal_links(soup, page_url, root_hostname)
+                target_base = self._strip_pagination_segments(self.target_url.lower())
+                regular_links, pagination_links, other_links = self._extract_internal_links(soup, page_url, root_hostname)
                 for pag_url in pagination_links:
-                    enqueue_pagination_link(pag_url)
+                    pag_base = self._strip_pagination_segments(pag_url.lower())
+                    if pag_base == target_base:
+                        enqueue_pagination_link(pag_url)
+                    else:
+                        enqueue_external_link(pag_url)
+
+                for oth_url in other_links:
+                    enqueue_external_link(oth_url)
 
                 # If direct files were captured:
                 if files_saved_here > 0:
@@ -936,9 +1017,8 @@ class SiteScraper:
                     log(f"📊 STATUS: {page_url} is EMPTY (no files captured from page or linked pages)")
                     return False
 
+            # Phase 1: Process target section pagination queue in order (Page 1, Page 2, Page 3, ...)
             consecutive_empty_pages = 0
-
-            # Priority 1: Process pagination queue in order (Page 1, Page 2, Page 3, ...)
             while pagination_queue and len(self.visited_urls) < self.max_crawl_pages:
                 if should_stop and should_stop():
                     log("Crawling stopped by user.")
@@ -959,8 +1039,51 @@ class SiteScraper:
                     consecutive_empty_pages += 1
                     log(f"Pagination page #{page_num} is EMPTY ({consecutive_empty_pages}/{self.consecutive_empty_threshold}).")
                     if consecutive_empty_pages >= self.consecutive_empty_threshold:
-                        log(f"Reached {self.consecutive_empty_threshold} consecutive empty pagination pages. Skipping remaining pagination sequence.")
+                        log(f"Reached {self.consecutive_empty_threshold} consecutive empty pagination pages. Skipping remaining pagination sequence for target section.")
                         break
+
+            # Phase 2: Explore remaining external / secondary sections discovered from headers/menus
+            if external_section_urls and len(self.visited_urls) < self.max_crawl_pages and not (should_stop and should_stop()):
+                log(f"Target section exploration finished. Starting exploration of {len(external_section_urls)} other discovered sections...")
+                external_by_section: dict[str, list[tuple[int, str]]] = {}
+                for ext_url in external_section_urls:
+                    ext_base = self._strip_pagination_segments(ext_url.lower())
+                    if ext_base not in external_by_section:
+                        external_by_section[ext_base] = []
+                    p_num = self._extract_page_number(ext_url)
+                    external_by_section[ext_base].append((p_num, ext_url))
+
+                for section_base, sec_pages in external_by_section.items():
+                    if should_stop and should_stop():
+                        break
+                    if len(self.visited_urls) >= self.max_crawl_pages:
+                        break
+
+                    sec_pages.sort(key=lambda x: x[0])
+                    log(f"--- Exploring external section: {section_base} ({len(sec_pages)} pages) ---")
+                    sec_consecutive_empty = 0
+
+                    for p_num, sec_url in sec_pages:
+                        if should_stop and should_stop():
+                            break
+                        if len(self.visited_urls) >= self.max_crawl_pages:
+                            break
+
+                        clean_sec_url = self._clean_url(sec_url)
+                        if self.get_page_status(clean_sec_url) is not None:
+                            continue
+
+                        log(f"Processing external section page #{p_num}: {sec_url}")
+                        is_sec_not_empty = evaluate_page(sec_url, current_depth=0, max_depth_limit=self.max_depth)
+
+                        if is_sec_not_empty:
+                            sec_consecutive_empty = 0
+                        else:
+                            sec_consecutive_empty += 1
+                            log(f"External section {section_base} page #{p_num} is EMPTY ({sec_consecutive_empty}/{self.consecutive_empty_threshold}).")
+                            if sec_consecutive_empty >= self.consecutive_empty_threshold:
+                                log(f"Reached {self.consecutive_empty_threshold} consecutive empty pages for section {section_base}. Skipping rest of this section.")
+                                break
 
         log(f"Crawling complete. Discovered {len(discovered_items)} valid PowerPoint presentations across {len(self.visited_urls)} pages.")
         return discovered_items
