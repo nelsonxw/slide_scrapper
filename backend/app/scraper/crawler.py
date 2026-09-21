@@ -56,16 +56,16 @@ class SiteScraper:
         self.consecutive_empty_threshold = consecutive_empty_threshold
         self.browser_driver = browser_driver or BrowserDownloader()
         self._browser_processed_pages: set[str] = set()
+        self.page_status: dict[str, str] = {}  # clean_url -> "not_empty" | "empty"
+        self.visited_urls: set[str] = set()
         self._pagination_gate_tracking: dict[str, int] = {}  # Track consecutive gated pages per pagination pattern
         self._pagination_empty_tracking: dict[str, int] = {}  # Track consecutive empty pages per pagination pattern
         self._pagination_context_stack: list[str] = []  # Stack of pagination contexts for nested exploration
         self._pagination_file_discovery: dict[str, bool] = {}  # Track if files found during pagination exploration
         self._pagination_page_status: dict[str, bool] = {}  # Track individual pagination page completion status
-        self._test_mode = False  # Test mode flag
-        self._user_agent = user_agent  # Store user_agent for test mode
-        self._custom_headers = custom_headers  # Store custom_headers for test mode
-        self._cookies = cookies  # Store cookies for test mode
-        self._allowed_test_urls: set[str] = set()  # Initialize test URLs set
+        self._user_agent = user_agent
+        self._custom_headers = custom_headers
+        self._cookies = cookies
         self.headers = {
             "User-Agent": self._user_agent
             or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -77,15 +77,37 @@ class SiteScraper:
 
         self.cookies: list[Cookie] = self._normalize_cookies(self._cookies)
 
-    def enable_test_mode(self):
-        """Enable test mode with limited scope."""
-        self._test_mode = True
-        self.max_crawl_pages = 10
-        self.max_depth = 2
-        self._allowed_test_urls = {
-            "https://slidemodel.com/free-powerpoint-templates/",
-            "https://slidemodel.com/free-powerpoint-templates/page/2/",
-        }
+    def _clean_url(self, url: str) -> str:
+        """Normalizes a URL by removing fragment and trailing slashes for status lookup."""
+        return url.split("#")[0].rstrip("/")
+
+    def get_page_status(self, url: str) -> str | None:
+        """Returns 'not_empty', 'empty', or None if not yet evaluated."""
+        return self.page_status.get(self._clean_url(url))
+
+    def set_page_status(self, url: str, status: str) -> None:
+        """Sets status for a page ('not_empty' or 'empty')."""
+        self.page_status[self._clean_url(url)] = status
+
+    def _extract_page_number(self, url: str) -> int:
+        """Extracts integer page number from a pagination URL, defaulting to 1."""
+        url_lower = url.lower()
+        patterns = [
+            r'/page/(\d+)',
+            r'/page-(\d+)',
+            r'[?&]page=(\d+)',
+            r'[?&]p=(\d+)',
+            r'/p(\d+)(?:/|$|\?)',
+            r'/pg(\d+)(?:/|$|\?)',
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, url_lower)
+            if m:
+                try:
+                    return int(m.group(1))
+                except ValueError:
+                    pass
+        return 1
 
     def _normalize_cookies(
         self,
@@ -402,11 +424,11 @@ class SiteScraper:
     def _is_pagination_link(self, url: str, current_url: str) -> bool:
         """
         Detects if a URL is a pagination link based on common patterns.
-        Returns True if the URL appears to be a pagination link.
+        Ensures the pagination link belongs to the same path sequence as current_url.
         """
         url_lower = url.lower()
         current_lower = current_url.lower()
-        
+
         # Common pagination patterns
         pagination_patterns = [
             r'/page/\d+',           # /page/2/, /page/3/
@@ -418,28 +440,56 @@ class SiteScraper:
             r'/p\d+',               # /p2, /p3
             r'/pg\d+',              # /pg2, /pg3
         ]
-        
+
+        has_pattern = False
         for pattern in pagination_patterns:
             if re.search(pattern, url_lower):
-                return True
-        
+                has_pattern = True
+                break
+
         # Check for next/prev buttons in same path structure
-        parsed_current = urlparse(current_lower)
-        parsed_url = urlparse(url_lower)
-        
-        # Same domain and similar path structure
-        if (parsed_current.hostname == parsed_url.hostname and 
-            parsed_url.path.startswith(parsed_current.path.rstrip('/'))):
-            # Check if it adds a pagination component
-            current_path_parts = parsed_current.path.rstrip('/').split('/')
-            url_path_parts = parsed_url.path.rstrip('/').split('/')
-            
-            # If URL has exactly one more path segment that looks like a number
-            if (len(url_path_parts) == len(current_path_parts) + 1 and
-                url_path_parts[-1].isdigit()):
+        if not has_pattern:
+            parsed_current = urlparse(current_lower)
+            parsed_url = urlparse(url_lower)
+            if (parsed_current.hostname == parsed_url.hostname and 
+                parsed_url.path.startswith(parsed_current.path.rstrip('/'))):
+                current_path_parts = parsed_current.path.rstrip('/').split('/')
+                url_path_parts = parsed_url.path.rstrip('/').split('/')
+                if (len(url_path_parts) == len(current_path_parts) + 1 and
+                    url_path_parts[-1].isdigit()):
+                    has_pattern = True
+
+        if not has_pattern:
+            return False
+
+        # Verify that the URL belongs to the same section/sequence as current_url or target_url
+        def _strip_pagination_segments(u: str) -> str:
+            u_clean = u.split('?')[0].split('#')[0].rstrip('/')
+            u_clean = re.sub(r'/page/\d+', '', u_clean, flags=re.IGNORECASE)
+            u_clean = re.sub(r'/page-\d+', '', u_clean, flags=re.IGNORECASE)
+            u_clean = re.sub(r'/p\d+$', '', u_clean, flags=re.IGNORECASE)
+            u_clean = re.sub(r'/pg\d+$', '', u_clean, flags=re.IGNORECASE)
+            return u_clean.rstrip('/')
+
+        url_base = _strip_pagination_segments(url_lower)
+        current_base = _strip_pagination_segments(current_lower)
+        target_base = _strip_pagination_segments(self.target_url.lower())
+
+        if url_base == current_base:
+            return True
+
+        parsed_tgt = urlparse(target_base)
+        parsed_url = urlparse(url_base)
+
+        if parsed_tgt.hostname == parsed_url.hostname:
+            if parsed_tgt.path in ('', '/'):
                 return True
-        
-        return False
+            if url_base.startswith(target_base):
+                return True
+            return False
+
+        # In unit tests or cross-host scenarios
+        return url_base == current_base or parsed_url.hostname != urlparse(current_base).hostname
 
     def _extract_internal_links(
         self,
@@ -469,12 +519,46 @@ class SiteScraper:
                 (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".pdf", ".zip", ".css", ".js", ".mp4", ".mp3", ".json", ".xml")
             ):
                 continue
+
+            sub_url_lower = sub_url.lower()
+
+            # 1. CRITICAL: Never follow logout or session-destroying URLs!
+            if any(k in sub_url_lower for k in (
+                "action=logout", "logout", "signout", "log-out", "sign-out", "wp-login.php"
+            )):
+                continue
+
+            # 2. Skip account management, checkout, and admin pages
+            if any(k in parsed_sub.path.lower() for k in (
+                "/account", "/wp-admin", "/checkout", "/cart", "/billing", "/plans-upgrade"
+            )):
+                continue
+
+            # 3. Skip static legal / utility pages that never contain slide templates
+            if any(k in parsed_sub.path.lower() for k in (
+                "/privacy-policy", "/terms-use", "/terms-of-use", "/dmca"
+            )):
+                continue
             
             # Separate pagination links from regular links if pagination is enabled
             if self.enable_pagination and self._is_pagination_link(sub_url, current_url):
                 pagination_links.append(sub_url)
             else:
                 regular_links.append(sub_url)
+
+        # Prioritize child links that match the target path section
+        target_path = urlparse(self.target_url).path.rstrip('/')
+        if target_path and target_path != '/':
+            target_prefix = target_path.lower()
+            in_section_links = []
+            other_links = []
+            for r_link in regular_links:
+                r_path = urlparse(r_link).path.lower()
+                if r_path.startswith(target_prefix):
+                    in_section_links.append(r_link)
+                else:
+                    other_links.append(r_link)
+            regular_links = in_section_links + other_links
         
         return regular_links, pagination_links
 
@@ -490,21 +574,21 @@ class SiteScraper:
                 on_log(message)
 
         discovered_items: list[DiscoveredPowerPoint] = []
-        visited_pages: set[str] = set()
-        queue: collections.deque[tuple[str, int]] = collections.deque([(self.target_url, 0)])
-        pagination_stack: list[tuple[str, int]] = []  # Stack for DFS on pagination
+        pagination_queue: list[tuple[int, str]] = []
+        enqueued_pagination_urls: set[str] = set()
 
-        # Target URLs to highlight for debugging
-        target_urls = {
-            "https://slidemodel.com/free-powerpoint-templates/free-why-now-slide-powerpoint-template/",
-            "https://slidemodel.com/free-powerpoint-templates/free-6-item-lightbulb-infographic-powerpoint-template/",
-        }
-        
-        # URLs to call out empty/non-empty status
-        status_urls = {
-            "https://slidemodel.com/free-powerpoint-templates/",
-            "https://slidemodel.com/free-powerpoint-templates/page/2/",
-        }
+        def enqueue_pagination_link(p_url: str):
+            if not self.enable_pagination:
+                return
+            clean_p = self._clean_url(p_url)
+            if clean_p not in enqueued_pagination_urls:
+                enqueued_pagination_urls.add(clean_p)
+                p_num = self._extract_page_number(p_url)
+                pagination_queue.append((p_num, p_url))
+                pagination_queue.sort(key=lambda x: x[0])
+                log(f"Enqueued pagination page #{p_num}: {p_url}")
+
+        enqueue_pagination_link(self.target_url)
 
         with self.browser_driver.connect_live_browser() as browser:
             if not browser.contexts:
@@ -517,68 +601,45 @@ class SiteScraper:
             page.set_default_navigation_timeout(10000)
             log("Active Chrome session detected. Crawling rendered pages through live CDP.")
 
-            while (queue or pagination_stack) and len(visited_pages) < self.max_crawl_pages:
+            def evaluate_live_page(page_url: str, current_depth: int, max_depth_limit: int) -> bool:
                 if should_stop and should_stop():
-                    log("Crawling stopped by user.")
-                    break
+                    return False
 
-                # Prioritize pagination stack (DFS) over regular queue (BFS)
-                is_pagination_page = False
-                if pagination_stack:
-                    current_url, depth = pagination_stack.pop()  # DFS: pop from stack
-                    is_pagination_page = True
-                    log(f"Processing pagination link (DFS): {current_url}")
-                    # Start tracking this pagination exploration
-                    self._start_pagination_exploration(current_url)
-                else:
-                    current_url, depth = queue.popleft()  # BFS: pop from queue
-                
-                clean_url = current_url.split("#")[0].rstrip("/")
-                if clean_url in visited_pages:
-                    continue
-                
-                # Test mode filtering
-                if self._test_mode and clean_url not in self._allowed_test_urls:
-                    # Check if it's a child URL of allowed test URLs
-                    is_child_url = any(clean_url.startswith(allowed_url.rstrip('/')) for allowed_url in self._allowed_test_urls)
-                    if not is_child_url:
-                        log(f"🧪 TEST MODE: Skipping {current_url} (not in allowed test scope)")
-                        continue
-                
-                visited_pages.add(clean_url)
-                
-                # Highlight target URLs
-                if clean_url in target_urls:
-                    log(f"🎯 TARGET URL HIT: {current_url}")
-                
-                log(f"Crawling rendered page ({len(visited_pages)}/{self.max_crawl_pages}, depth={depth}): {current_url}")
+                clean = self._clean_url(page_url)
+                existing_status = self.get_page_status(clean)
+                if existing_status is not None:
+                    log(f"Skipping already evaluated page ({existing_status}): {page_url}")
+                    return existing_status == "not_empty"
+
+                if len(self.visited_urls) >= self.max_crawl_pages:
+                    log(f"Reached max crawl pages limit ({self.max_crawl_pages}).")
+                    return False
+
+                self.visited_urls.add(clean)
+                log(f"Crawling rendered page ({len(self.visited_urls)}/{self.max_crawl_pages}, depth={current_depth}/{max_depth_limit}): {page_url}")
 
                 try:
-                    page.goto(current_url, wait_until="domcontentloaded", timeout=10000)
+                    page.goto(page_url, wait_until="domcontentloaded", timeout=10000)
                     page.wait_for_timeout(500)
                     rendered_html = page.content()
                 except Exception as error:
-                    log(f"Failed to render {current_url} in live browser: {error}")
-                    continue
+                    log(f"Failed to render {page_url} in live browser: {error}")
+                    self.set_page_status(page_url, "empty")
+                    return False
 
                 soup = BeautifulSoup(rendered_html, "html.parser")
                 auth_gate_detected = self.browser_driver.page_requires_authentication(page)
                 authentication = BrowserDownloader.has_authentication_cookies(context.cookies())
                 was_gated = auth_gate_detected and not authentication
-                
-                log(
-                    "Live browser authentication check: "
-                    f"authentication={str(authentication).lower()}, "
-                    f"final_url={page.url}, auth_gate_detected={str(auth_gate_detected).lower()}"
-                )
+
+                if was_gated:
+                    log(f"Gated page detected without authentication on {page.url}.")
 
                 candidates = self._extract_download_candidates(soup, page.url)
-                if candidates:
-                    log(f"Rendered page exposes {len(candidates)} download candidates.")
                 has_download_control = self.browser_driver.has_visible_download_control(page)
-                
-                page_had_files = False
-                if candidates and has_download_control and page.url not in self._browser_processed_pages:
+
+                files_saved_here = 0
+                if candidates and has_download_control and page.url not in self._browser_processed_pages and not was_gated:
                     self._browser_processed_pages.add(page.url)
                     try:
                         result = self.browser_driver.download_powerpoint_from_live_page(
@@ -595,91 +656,81 @@ class SiteScraper:
                         item = DiscoveredPowerPoint(
                             title=name.rsplit(".", 1)[0].replace("_", " ").title(),
                             download_url=page.url,
-                            source_page_url=current_url,
+                            source_page_url=page_url,
                             format_type="pptx",
                             content_bytes=content,
                             file_size=len(content),
                         )
                         discovered_items.append(item)
-                        page_had_files = True
-                        # Record file discovery for pagination tracking
-                        self._record_file_discovery(current_url)
+                        files_saved_here += 1
                         if on_found:
                             on_found(item)
-                
-                was_empty = not was_gated and not page_had_files
 
-                if depth < self.max_depth:
-                    regular_links, pagination_links = self._extract_internal_links(soup, page.url, root_hostname)
-                    
-                    # Always explore internal links to find actual downloads
-                    # This applies to all pages, not just pagination pages
-                    if regular_links:
-                        log(f"Page has {len(regular_links)} internal links - adding to queue for exploration")
-                        # Add all internal links to queue for exploration
-                        exploration_depth = min(depth + 1, self.max_depth)
-                        for sub_url in regular_links:
-                            clean_sub = sub_url.split("#")[0].rstrip("/")
-                            if clean_sub not in visited_pages:
-                                queue.append((sub_url, exploration_depth))
-                                log(f"Added internal link at depth {exploration_depth}: {sub_url}")
-                    
-                    # Complete pagination exploration if this was a pagination page
-                    if is_pagination_page:
-                        should_skip_sequence = self._complete_pagination_exploration(current_url)
-                        if should_skip_sequence:
-                            pattern = self._get_pagination_pattern(current_url)
-                            log(f"Skipping remaining pagination for pattern {pattern} - no files found in link tree exploration")
-                            # Clear remaining pagination links for this pattern
-                            pagination_links = [link for link in pagination_links if not self._get_pagination_pattern(link) == pattern]
-                    
-                    # Filter out pagination links if we've hit the gate threshold
-                    if pagination_links:
-                        filtered_pagination = []
-                        for pag_link in pagination_links:
-                            if self._should_skip_pagination(pag_link, was_gated):
-                                pattern = self._get_pagination_pattern(pag_link)
-                                log(f"Skipping pagination link {pag_link} (pattern: {pattern}) - {self.consecutive_gate_threshold} consecutive gated pages detected")
-                            else:
-                                filtered_pagination.append(pag_link)
-                        pagination_links = filtered_pagination
-                        
-                        if pagination_links:
-                            log(f"Found {len(pagination_links)} pagination links, using depth-first traversal")
-                        else:
-                            log("All pagination links skipped due to consecutive gated pages")
-                    
-                    # Use depth-first for pagination: add to stack in reverse order for proper DFS
-                    for sub_url in reversed(pagination_links):
-                        clean_sub = sub_url.split("#")[0].rstrip("/")
-                        if clean_sub not in visited_pages:
-                            # Check if this is nested pagination within current context
-                            current_context = self._pagination_context_stack[-1] if self._pagination_context_stack else None
-                            if current_context and self._is_nested_pagination(sub_url, current_context):
-                                # This is nested pagination - add to stack for independent exploration
-                                pagination_stack.append((sub_url, depth))
-                                log(f"Added nested pagination link to DFS stack: {sub_url}")
-                            else:
-                                # Regular pagination or no current context
-                                pagination_stack.append((sub_url, depth))
-                                log(f"Added pagination link to DFS stack: {sub_url}")
-                    
-                    # Add remaining regular links to the back of the queue (BFS for non-pagination)
+                regular_links, pagination_links = self._extract_internal_links(soup, page.url, root_hostname)
+                for pag_url in pagination_links:
+                    enqueue_pagination_link(pag_url)
+
+                if files_saved_here > 0:
+                    self.set_page_status(page_url, "not_empty")
+                    log(f"📊 STATUS: {page_url} is NOT EMPTY ({files_saved_here} file(s) captured directly)")
+                    return True
+
+                has_child_files = False
+                if current_depth < max_depth_limit and regular_links and not was_gated:
+                    log(f"Exploring {len(regular_links)} linked pages from {page_url} (depth={current_depth + 1}/{max_depth_limit})...")
                     for sub_url in regular_links:
-                        clean_sub = sub_url.split("#")[0].rstrip("/")
-                        if clean_sub not in visited_pages:
-                            queue.append((sub_url, depth + 1))
+                        if should_stop and should_stop():
+                            break
+                        if len(self.visited_urls) >= self.max_crawl_pages:
+                            break
 
-        log(f"Live browser crawl complete. Discovered {len(discovered_items)} valid PowerPoint presentations across {len(visited_pages)} pages.")
-        
-        # Call out empty/non-empty status for target URLs
-        for status_url in status_urls:
-            if status_url in visited_pages:
-                base_url = self._get_pagination_base_url(status_url)
-                had_files = self._pagination_file_discovery.get(base_url, False)
-                status = "NOT EMPTY" if had_files else "EMPTY"
-                log(f"📊 STATUS: {status_url} is {status}")
-        
+                        sub_clean = self._clean_url(sub_url)
+                        sub_status = self.get_page_status(sub_clean)
+                        if sub_status == "not_empty":
+                            has_child_files = True
+                            continue
+                        elif sub_status == "empty":
+                            continue
+
+                        child_result = evaluate_live_page(sub_url, current_depth + 1, max_depth_limit)
+                        if child_result:
+                            has_child_files = True
+
+                if has_child_files:
+                    self.set_page_status(page_url, "not_empty")
+                    log(f"📊 STATUS: {page_url} is NOT EMPTY (downloaded from linked pages)")
+                    return True
+                else:
+                    self.set_page_status(page_url, "empty")
+                    log(f"📊 STATUS: {page_url} is EMPTY (no files captured from page or linked pages)")
+                    return False
+
+            consecutive_empty_pages = 0
+
+            while pagination_queue and len(self.visited_urls) < self.max_crawl_pages:
+                if should_stop and should_stop():
+                    log("Crawling stopped by user.")
+                    break
+
+                page_num, page_url = pagination_queue.pop(0)
+                clean_p_url = self._clean_url(page_url)
+                if self.get_page_status(clean_p_url) is not None:
+                    continue
+
+                log(f"--- Processing Priority Pagination Page #{page_num}: {page_url} ---")
+                is_not_empty = evaluate_live_page(page_url, current_depth=0, max_depth_limit=self.max_depth)
+
+                if is_not_empty:
+                    consecutive_empty_pages = 0
+                    log(f"Pagination page #{page_num} is NOT EMPTY. Consecutive empty count reset to 0.")
+                else:
+                    consecutive_empty_pages += 1
+                    log(f"Pagination page #{page_num} is EMPTY ({consecutive_empty_pages}/{self.consecutive_empty_threshold}).")
+                    if consecutive_empty_pages >= self.consecutive_empty_threshold:
+                        log(f"Reached {self.consecutive_empty_threshold} consecutive empty pagination pages. Skipping remaining pagination sequence.")
+                        break
+
+        log(f"Live browser crawl complete. Discovered {len(discovered_items)} valid PowerPoint presentations across {len(self.visited_urls)} pages.")
         return discovered_items
 
     def crawl_and_extract(
@@ -689,9 +740,14 @@ class SiteScraper:
         should_stop: Callable[[], bool] | None = None,
     ) -> list[DiscoveredPowerPoint]:
         """
-        Performs hybrid crawling: DFS for pagination, BFS for regular links.
-        Pagination links are processed depth-first to follow sequences completely,
-        while regular links use breadth-first search for broader coverage.
+        Revamped crawling pipeline:
+        1. Checks empty/non-empty status before crawling any page. If already determined, skips immediately.
+        2. Prioritizes pagination pages as the primary catalog sequence (Page 1 -> Page 2 -> Page 3...).
+        3. On each page, checks for direct download candidates first. If captured, marks page 'not_empty'.
+           If no direct files captured, explores linked pages up to max_depth. If >=1 file captured from
+           linked pages, marks page 'not_empty'; otherwise marks page 'empty'.
+        4. When consecutive pagination pages are flagged 'empty' up to consecutive_empty_threshold,
+           skips remaining pagination sequence.
         """
         def log(msg: str):
             if on_log:
@@ -700,28 +756,19 @@ class SiteScraper:
         parsed_root = urlparse(self.target_url)
         root_hostname = (parsed_root.hostname or "").lower()
 
-        log(f"Starting crawl on: {self.target_url} (Domain: {root_hostname})")
-
-        # Target URLs to highlight for debugging
-        target_urls = {
-            "https://slidemodel.com/free-powerpoint-templates/free-why-now-slide-powerpoint-template/",
-            "https://slidemodel.com/free-powerpoint-templates/free-6-item-lightbulb-infographic-powerpoint-template/",
-        }
-        
-        # URLs to call out empty/non-empty status
-        status_urls = {
-            "https://slidemodel.com/free-powerpoint-templates/",
-            "https://slidemodel.com/free-powerpoint-templates/page/2/",
-        }
+        log(f"Starting crawl on: {self.target_url} (Domain: {root_hostname}, max_depth={self.max_depth}, max_pages={self.max_crawl_pages})")
 
         # Direct check if user provided a direct PPTX download URL
         if is_powerpoint_url_or_header(self.target_url):
-            log(f"Target URL appears to be a direct PowerPoint link. Fetching directly...")
+            log("Target URL appears to be a direct PowerPoint link. Fetching directly...")
             item = self._fetch_and_validate(self.target_url, self.target_url, "Direct Presentation", log)
             if item:
+                self.set_page_status(self.target_url, "not_empty")
                 if on_found:
                     on_found(item)
                 return [item]
+            self.set_page_status(self.target_url, "empty")
+            return []
 
         self._browser_processed_pages.clear()
         if self.use_browser and self.browser_driver.is_browser_open():
@@ -733,11 +780,25 @@ class SiteScraper:
             )
 
         discovered_items: list[DiscoveredPowerPoint] = []
-        visited_pages: set[str] = set()
         seen_download_urls: set[str] = set()
 
-        queue: collections.deque[tuple[str, int]] = collections.deque([(self.target_url, 0)])
-        pagination_stack: list[tuple[str, int]] = []  # Stack for DFS on pagination
+        # Priority queue for pagination pages: list of (page_num, url)
+        pagination_queue: list[tuple[int, str]] = []
+        enqueued_pagination_urls: set[str] = set()
+
+        def enqueue_pagination_link(p_url: str):
+            if not self.enable_pagination:
+                return
+            clean_p = self._clean_url(p_url)
+            if clean_p not in enqueued_pagination_urls:
+                enqueued_pagination_urls.add(clean_p)
+                p_num = self._extract_page_number(p_url)
+                pagination_queue.append((p_num, p_url))
+                pagination_queue.sort(key=lambda x: x[0])
+                log(f"Enqueued pagination page #{p_num}: {p_url}")
+
+        # Seed pagination queue with target URL
+        enqueue_pagination_link(self.target_url)
 
         with httpx.Client(
             headers=self.headers,
@@ -746,76 +807,55 @@ class SiteScraper:
             verify=False,
         ) as client:
             self._configure_client_cookies(client)
-            while (queue or pagination_stack) and len(visited_pages) < self.max_crawl_pages:
+
+            def evaluate_page(page_url: str, current_depth: int, max_depth_limit: int) -> bool:
+                """
+                Evaluates a page up to max_depth_limit.
+                Returns True if at least 1 file was saved from this page or its allowed linked pages.
+                Sets page_status to 'not_empty' if True, else 'empty'.
+                """
                 if should_stop and should_stop():
-                    log("Crawling stopped by user.")
-                    break
+                    return False
 
-                # Prioritize pagination stack (DFS) over regular queue (BFS)
-                is_pagination_page = False
-                if pagination_stack:
-                    current_url, depth = pagination_stack.pop()  # DFS: pop from stack
-                    is_pagination_page = True
-                    log(f"Processing pagination link (DFS): {current_url}")
-                    # Start tracking this pagination exploration
-                    self._start_pagination_exploration(current_url)
-                else:
-                    current_url, depth = queue.popleft()  # BFS: pop from queue
-                
-                clean_url = current_url.split("#")[0].rstrip("/")
-                if clean_url in visited_pages:
-                    continue
-                
-                # Test mode filtering
-                if self._test_mode and clean_url not in self._allowed_test_urls:
-                    # Check if it's a child URL of allowed test URLs
-                    is_child_url = any(clean_url.startswith(allowed_url.rstrip('/')) for allowed_url in self._allowed_test_urls)
-                    if not is_child_url:
-                        log(f"🧪 TEST MODE: Skipping {current_url} (not in allowed test scope)")
-                        continue
-                
-                visited_pages.add(clean_url)
-                
-                # Highlight target URLs
-                if clean_url in target_urls:
-                    log(f"🎯 TARGET URL HIT: {current_url}")
+                clean = self._clean_url(page_url)
 
-                log(f"Crawling page ({len(visited_pages)}/{self.max_crawl_pages}, depth={depth}): {current_url}")
+                # Rule 2: Check status before crawling. If already determined, skip!
+                existing_status = self.get_page_status(clean)
+                if existing_status is not None:
+                    log(f"Skipping already evaluated page ({existing_status}): {page_url}")
+                    return existing_status == "not_empty"
+
+                if len(self.visited_urls) >= self.max_crawl_pages:
+                    log(f"Reached max crawl pages limit ({self.max_crawl_pages}).")
+                    return False
+
+                self.visited_urls.add(clean)
+                log(f"Crawling page ({len(self.visited_urls)}/{self.max_crawl_pages}, depth={current_depth}/{max_depth_limit}): {page_url}")
 
                 try:
-                    resp = client.get(current_url)
+                    resp = client.get(page_url)
                 except Exception as e:
-                    log(f"Failed to fetch {current_url}: {e}")
-                    continue
+                    log(f"Failed to fetch {page_url}: {e}")
+                    self.set_page_status(page_url, "empty")
+                    return False
 
                 if resp.status_code != 200:
-                    log(f"HTTP {resp.status_code} on {current_url}")
-                    continue
-
-                auth_gate_detected = self._response_requires_authentication(resp)
-                authentication = BrowserDownloader.has_authentication_cookies(self.cookies)
-                was_gated = auth_gate_detected and not authentication
-                
-                log(
-                    "Authentication check: "
-                    f"authentication={str(authentication).lower()}, "
-                    f"HTTP {resp.status_code}, final_url={resp.url}, "
-                    f"cookies_applied={len(self.cookies)}, "
-                    f"auth_gate_detected={auth_gate_detected}"
-                )
+                    log(f"HTTP {resp.status_code} on {page_url}")
+                    self.set_page_status(page_url, "empty")
+                    return False
 
                 content_type = resp.headers.get("content-type", "").lower()
 
-                # If the URL itself directly returned binary content
+                # Direct binary presentation check
                 is_ppt, fmt = is_powerpoint_content(resp.content)
                 if is_ppt:
-                    if current_url not in seen_download_urls:
-                        seen_download_urls.add(current_url)
-                        title = self._extract_title_from_url(current_url)
+                    if page_url not in seen_download_urls:
+                        seen_download_urls.add(page_url)
+                        title = self._extract_title_from_url(page_url)
                         item = DiscoveredPowerPoint(
                             title=title,
-                            download_url=current_url,
-                            source_page_url=current_url,
+                            download_url=page_url,
+                            source_page_url=page_url,
                             format_type=fmt,
                             content_bytes=resp.content,
                             file_size=len(resp.content),
@@ -824,139 +864,100 @@ class SiteScraper:
                         discovered_items.append(item)
                         if on_found:
                             on_found(item)
-                    continue
+                    self.set_page_status(page_url, "not_empty")
+                    log(f"📊 STATUS: {page_url} is NOT EMPTY")
+                    return True
 
-                if "html" not in content_type and not current_url.endswith((".html", ".htm", "/")):
-                    continue
+                if "html" not in content_type and not page_url.endswith((".html", ".htm", "/")):
+                    self.set_page_status(page_url, "empty")
+                    return False
 
-                # Parse HTML for download buttons and links
                 soup = BeautifulSoup(resp.text, "html.parser")
 
-                # 1. Search <a> links, download buttons, and download form submits
-                candidate_download_links: list[tuple[str, str]] = []  # (url, title)
-
-                for tag in soup.find_all(["a", "button", "form", "input", "div", "span"]):
-                    href = (
-                        tag.get("href")
-                        or tag.get("data-href")
-                        or tag.get("data-url")
-                        or tag.get("action")
-                        or tag.get("formaction")
-                        or (tag.find_parent("form").get("action") if tag.find_parent("form") else None)
-                    )
-                    if not href or href.startswith(("javascript:", "mailto:", "tel:", "#")):
-                        continue
-
-                    full_url = urljoin(current_url, href)
-
-                    if self._is_download_element(tag, full_url):
-                        link_title = (
-                            tag.get_text(strip=True)
-                            or tag.get("value")
-                            or tag.get("title")
-                            or tag.get("aria-label")
-                            or self._extract_title_from_url(full_url)
-                        )
-                        clean_title = re.sub(r"(?i)\b(download|free|pptx|ppt|powerpoint|template|get)\b", "", str(link_title)).strip()
-                        clean_title = clean_title or self._extract_title_from_url(full_url)
-                        candidate_download_links.append((full_url, clean_title))
-
-                # Also search for any direct .pptx / .ppt links in HTML attributes or script tags
-                for ppt_match in re.finditer(r'https?://[^\s"\'<>]+\.(?:pptx|ppt)(?:\?[^\s"\'<>]*)?', resp.text, re.IGNORECASE):
-                    matched_url = ppt_match.group(0)
-                    candidate_download_links.append((matched_url, self._extract_title_from_url(matched_url)))
-
-                # Process download candidates
-                page_had_files = False
-                for dl_url, dl_title in candidate_download_links:
+                # 1. Check if page has any direct download candidate
+                candidates = self._extract_download_candidates(soup, page_url)
+                files_saved_here = 0
+                for dl_url, dl_title in candidates:
                     if dl_url in seen_download_urls:
                         continue
                     seen_download_urls.add(dl_url)
-
                     log(f"Inspecting download candidate: {dl_title} -> {dl_url}")
-                    item = self._fetch_and_validate(dl_url, current_url, dl_title, log, client=client)
+                    item = self._fetch_and_validate(dl_url, page_url, dl_title, log, client=client)
                     if item:
                         discovered_items.append(item)
-                        page_had_files = True
-                        # Record file discovery for pagination tracking
-                        self._record_file_discovery(current_url)
+                        files_saved_here += 1
                         if on_found:
                             on_found(item)
-                
-                was_empty = not was_gated and not page_had_files
 
-                # 2. Queue internal sub-pages for crawling
-                if depth < self.max_depth:
-                    regular_links, pagination_links = self._extract_internal_links(soup, current_url, root_hostname)
-                    
-                    # Always explore internal links to find actual downloads
-                    # This applies to all pages, not just pagination pages
-                    if regular_links:
-                        log(f"Page has {len(regular_links)} internal links - adding to queue for exploration")
-                        # Add all internal links to queue for exploration
-                        exploration_depth = min(depth + 1, self.max_depth)
-                        for sub_url in regular_links:
-                            clean_sub = sub_url.split("#")[0].rstrip("/")
-                            if clean_sub not in visited_pages:
-                                queue.append((sub_url, exploration_depth))
-                                log(f"Added internal link at depth {exploration_depth}: {sub_url}")
-                    
-                    # Complete pagination exploration if this was a pagination page
-                    if is_pagination_page:
-                        should_skip_sequence = self._complete_pagination_exploration(current_url)
-                        if should_skip_sequence:
-                            pattern = self._get_pagination_pattern(current_url)
-                            log(f"Skipping remaining pagination for pattern {pattern} - no files found in link tree exploration")
-                            # Clear remaining pagination links for this pattern
-                            pagination_links = [link for link in pagination_links if not self._get_pagination_pattern(link) == pattern]
-                    
-                    # Filter out pagination links if we've hit the gate threshold
-                    if pagination_links:
-                        filtered_pagination = []
-                        for pag_link in pagination_links:
-                            if self._should_skip_pagination(pag_link, was_gated):
-                                pattern = self._get_pagination_pattern(pag_link)
-                                log(f"Skipping pagination link {pag_link} (pattern: {pattern}) - {self.consecutive_gate_threshold} consecutive gated pages detected")
-                            else:
-                                filtered_pagination.append(pag_link)
-                        pagination_links = filtered_pagination
-                        
-                        if pagination_links:
-                            log(f"Found {len(pagination_links)} pagination links, using depth-first traversal")
-                        else:
-                            log("All pagination links skipped due to consecutive gated pages")
-                    
-                    # Use depth-first for pagination: add to stack in reverse order for proper DFS
-                    for sub_url in reversed(pagination_links):
-                        clean_sub = sub_url.split("#")[0].rstrip("/")
-                        if clean_sub not in visited_pages:
-                            # Check if this is nested pagination within current context
-                            current_context = self._pagination_context_stack[-1] if self._pagination_context_stack else None
-                            if current_context and self._is_nested_pagination(sub_url, current_context):
-                                # This is nested pagination - add to stack for independent exploration
-                                pagination_stack.append((sub_url, depth))
-                                log(f"Added nested pagination link to DFS stack: {sub_url}")
-                            else:
-                                # Regular pagination or no current context
-                                pagination_stack.append((sub_url, depth))
-                                log(f"Added pagination link to DFS stack: {sub_url}")
-                    
-                    # Add remaining regular links to the back of the queue (BFS for non-pagination)
+                # Extract internal links & pagination links
+                regular_links, pagination_links = self._extract_internal_links(soup, page_url, root_hostname)
+                for pag_url in pagination_links:
+                    enqueue_pagination_link(pag_url)
+
+                # If direct files were captured:
+                if files_saved_here > 0:
+                    self.set_page_status(page_url, "not_empty")
+                    log(f"📊 STATUS: {page_url} is NOT EMPTY ({files_saved_here} file(s) captured directly)")
+                    return True
+
+                # If no direct file, explore linked pages up to max_depth_limit
+                has_child_files = False
+                if current_depth < max_depth_limit and regular_links:
+                    log(f"Exploring {len(regular_links)} linked pages from {page_url} (depth={current_depth + 1}/{max_depth_limit})...")
                     for sub_url in regular_links:
-                        clean_sub = sub_url.split("#")[0].rstrip("/")
-                        if clean_sub not in visited_pages:
-                            queue.append((sub_url, depth + 1))
+                        if should_stop and should_stop():
+                            break
+                        if len(self.visited_urls) >= self.max_crawl_pages:
+                            break
 
-        log(f"Crawling complete. Discovered {len(discovered_items)} valid PowerPoint presentations across {len(visited_pages)} pages.")
-        
-        # Call out empty/non-empty status for target URLs
-        for status_url in status_urls:
-            if status_url in visited_pages:
-                base_url = self._get_pagination_base_url(status_url)
-                had_files = self._pagination_file_discovery.get(base_url, False)
-                status = "NOT EMPTY" if had_files else "EMPTY"
-                log(f"📊 STATUS: {status_url} is {status}")
-        
+                        sub_clean = self._clean_url(sub_url)
+                        sub_status = self.get_page_status(sub_clean)
+                        if sub_status == "not_empty":
+                            has_child_files = True
+                            continue
+                        elif sub_status == "empty":
+                            continue
+
+                        child_result = evaluate_page(sub_url, current_depth + 1, max_depth_limit)
+                        if child_result:
+                            has_child_files = True
+
+                if has_child_files:
+                    self.set_page_status(page_url, "not_empty")
+                    log(f"📊 STATUS: {page_url} is NOT EMPTY (downloaded from linked pages)")
+                    return True
+                else:
+                    self.set_page_status(page_url, "empty")
+                    log(f"📊 STATUS: {page_url} is EMPTY (no files captured from page or linked pages)")
+                    return False
+
+            consecutive_empty_pages = 0
+
+            # Priority 1: Process pagination queue in order (Page 1, Page 2, Page 3, ...)
+            while pagination_queue and len(self.visited_urls) < self.max_crawl_pages:
+                if should_stop and should_stop():
+                    log("Crawling stopped by user.")
+                    break
+
+                page_num, page_url = pagination_queue.pop(0)
+                clean_p_url = self._clean_url(page_url)
+                if self.get_page_status(clean_p_url) is not None:
+                    continue
+
+                log(f"--- Processing Priority Pagination Page #{page_num}: {page_url} ---")
+                is_not_empty = evaluate_page(page_url, current_depth=0, max_depth_limit=self.max_depth)
+
+                if is_not_empty:
+                    consecutive_empty_pages = 0
+                    log(f"Pagination page #{page_num} is NOT EMPTY. Consecutive empty count reset to 0.")
+                else:
+                    consecutive_empty_pages += 1
+                    log(f"Pagination page #{page_num} is EMPTY ({consecutive_empty_pages}/{self.consecutive_empty_threshold}).")
+                    if consecutive_empty_pages >= self.consecutive_empty_threshold:
+                        log(f"Reached {self.consecutive_empty_threshold} consecutive empty pagination pages. Skipping remaining pagination sequence.")
+                        break
+
+        log(f"Crawling complete. Discovered {len(discovered_items)} valid PowerPoint presentations across {len(self.visited_urls)} pages.")
         return discovered_items
 
     def _fetch_url(self, url: str, client: httpx.Client | None = None) -> httpx.Response | None:

@@ -238,16 +238,20 @@ class BrowserDownloader:
     def has_visible_download_control(self, page: Page) -> bool:
         """Returns whether the rendered page exposes an actionable download control."""
         selectors = (
-            "input[type='submit']",
-            "button[type='submit']",
             "button:has-text('Download')",
             "button:has-text('PowerPoint')",
             "button:has-text('PPTX')",
             "a:has-text('Download PowerPoint')",
             "a:has-text('Download PPTX')",
+            "a:has-text('Download')",
             "a[href*='.pptx']",
             "a[href*='.ppt']",
+            "a[href*='download']",
             "[download]",
+            "input[value*='Download' i]",
+            "button[type='submit'][value*='Download' i]",
+            "form[action*='download' i] input[type='submit']",
+            "form[action*='download' i] button[type='submit']",
         )
         return any(page.locator(selector).first.is_visible() for selector in selectors)
 
@@ -726,9 +730,6 @@ class BrowserDownloader:
 
                 # 1. Search for download candidates on the page
                 download_selectors = [
-                    "input[type='submit']",
-                    "button[type='submit']",
-                    "input[type='submit'][value*='Download' i]",
                     "button:has-text('Download')",
                     "button:has-text('PowerPoint')",
                     "button:has-text('PPTX')",
@@ -739,6 +740,10 @@ class BrowserDownloader:
                     "a[href*='.ppt']",
                     "a[href*='download']",
                     "[download]",
+                    "input[type='submit'][value*='Download' i]",
+                    "button[type='submit'][value*='Download' i]",
+                    "form[action*='download' i] input[type='submit']",
+                    "form[action*='download' i] button[type='submit']",
                 ]
 
                 download_element = None

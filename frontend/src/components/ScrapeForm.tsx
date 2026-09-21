@@ -17,10 +17,9 @@ const PRESET_URLS = [
 export const ScrapeForm: React.FC<ScrapeFormProps> = ({ onScrapeComplete, onNavigateToGallery }) => {
   const [url, setUrl] = useState('');
   const [maxPages, setMaxPages] = useState(100);
-  const [maxDepth, setMaxDepth] = useState(3);
+  const [maxDepth, setMaxDepth] = useState(4);
   const [consecutiveGateThreshold, setConsecutiveGateThreshold] = useState(3);
   const [consecutiveEmptyThreshold, setConsecutiveEmptyThreshold] = useState(3);
-  const [testMode, setTestMode] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [activeTask, setActiveTask] = useState<ScrapeTaskStatus | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -64,7 +63,6 @@ export const ScrapeForm: React.FC<ScrapeFormProps> = ({ onScrapeComplete, onNavi
         enable_pagination: true,
         consecutive_gate_threshold: consecutiveGateThreshold,
         consecutive_empty_threshold: consecutiveEmptyThreshold,
-        test_mode: testMode,
       });
       setActiveTask(task);
     } catch (err: any) {
@@ -354,26 +352,6 @@ export const ScrapeForm: React.FC<ScrapeFormProps> = ({ onScrapeComplete, onNavi
               <span style={{ fontSize: '11px', color: 'var(--slate-400)' }}>
                 Skip pagination after N consecutive empty pages (no files found)
               </span>
-            </div>
-
-            <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
-                <label style={{ fontSize: '12px', fontWeight: '700', color: 'var(--slate-700)' }}>
-                  Test Mode
-                </label>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <input
-                  type="checkbox"
-                  checked={testMode}
-                  onChange={(e) => setTestMode(e.target.checked)}
-                  disabled={Boolean(isRunning)}
-                  style={{ accentColor: 'var(--primary)', cursor: 'pointer' }}
-                />
-                <span style={{ fontSize: '11px', color: 'var(--slate-400)' }}>
-                  Limit scope to base URL + page/2 with detailed logging
-                </span>
-              </div>
             </div>
           </div>
 

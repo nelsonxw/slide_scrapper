@@ -58,13 +58,19 @@ export const BrowserSessionAuth: React.FC<BrowserSessionAuthProps> = ({ targetUr
     }
   };
 
-  const verifySession = async () => {
+  const verifyAndCompleteSession = async () => {
     setIsLoading(true);
     setError(null);
     try {
-      setSession(await api.verifyBrowserSession());
+      // First verify the session
+      const verifiedSession = await api.verifyBrowserSession();
+      setSession(verifiedSession);
+      
+      // Then mark it as complete
+      const completedSession = await api.completeBrowserSession();
+      setSession(completedSession);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to verify the open browser session.');
+      setError(err instanceof Error ? err.message : 'Unable to verify and complete the browser session.');
     } finally {
       setIsLoading(false);
     }
@@ -77,18 +83,6 @@ export const BrowserSessionAuth: React.FC<BrowserSessionAuthProps> = ({ targetUr
       setSession(await api.completeBrowserSession());
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to complete the browser session.');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const closeBrowser = async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      setSession(await api.closeBrowserSession());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Unable to close the scraper browser.');
     } finally {
       setIsLoading(false);
     }
@@ -158,10 +152,28 @@ export const BrowserSessionAuth: React.FC<BrowserSessionAuthProps> = ({ targetUr
       )}
 
       <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+        {!isBrowserOpen && (
+          <button
+            type="button"
+            onClick={connectSession}
+            disabled={isConnecting}
+            style={{
+              background: isConnecting ? 'var(--slate-300)' : 'var(--primary)',
+              color: '#ffffff',
+              border: 'none',
+              borderRadius: 'var(--radius-sm)',
+              padding: '7px 12px',
+              fontSize: '12px',
+              fontWeight: 700,
+            }}
+          >
+            {isConnecting ? 'Starting Chrome...' : isConnected ? 'Reopen target in Chrome' : 'Open target in Chrome'}
+          </button>
+        )}
         {isBrowserOpen && (
           <button
             type="button"
-            onClick={verifySession}
+            onClick={verifyAndCompleteSession}
             disabled={isLoading}
             style={{
               background: '#ffffff',
@@ -173,43 +185,9 @@ export const BrowserSessionAuth: React.FC<BrowserSessionAuthProps> = ({ targetUr
               fontWeight: 700,
             }}
           >
-            Check login
+            Check login & Mark complete
           </button>
         )}
-        {isBrowserOpen && (
-          <button
-            type="button"
-            onClick={closeBrowser}
-            disabled={isLoading}
-            style={{
-              background: '#ffffff',
-              color: 'var(--slate-700)',
-              border: '1px solid var(--slate-300)',
-              borderRadius: 'var(--radius-sm)',
-              padding: '7px 12px',
-              fontSize: '12px',
-              fontWeight: 700,
-            }}
-          >
-            Close scraper browser (cancel)
-          </button>
-        )}
-        <button
-          type="button"
-          onClick={isBrowserOpen ? completeSession : connectSession}
-          disabled={isConnecting}
-          style={{
-            background: isConnecting ? 'var(--slate-300)' : 'var(--primary)',
-            color: '#ffffff',
-            border: 'none',
-            borderRadius: 'var(--radius-sm)',
-            padding: '7px 12px',
-            fontSize: '12px',
-            fontWeight: 700,
-          }}
-        >
-          {isConnecting ? 'Starting Chrome...' : isBrowserOpen ? 'Mark login complete' : isConnected ? 'Reopen target in Chrome' : 'Open target in Chrome'}
-        </button>
         {isConnected && (
           <button
             type="button"

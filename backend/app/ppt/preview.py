@@ -100,43 +100,47 @@ def _ensure_powerpoint_registered() -> None:
 
 def _get_powerpoint_com_app():
     """
-    Acquires a PowerPoint COM application instance.
-    Tries GetActiveObject, then Dispatch, and falls back to launching /AUTOMATION.
+    Acquires a responsive PowerPoint COM application instance.
+    Validates that the Presentations collection is accessible.
     """
     import win32com.client
 
     # 1. Try connecting to already running instance
     try:
-        return win32com.client.GetActiveObject("PowerPoint.Application")
+        app = win32com.client.GetActiveObject("PowerPoint.Application")
+        _ = app.Presentations
+        return app
     except Exception:
         pass
 
     # 2. Try dispatching via registered COM class
     try:
-        return win32com.client.Dispatch("PowerPoint.Application")
+        app = win32com.client.Dispatch("PowerPoint.Application")
+        _ = app.Presentations
+        return app
     except Exception:
         pass
 
-    # 3. If dispatch fails (e.g. strict ClickToRun sandbox), launch with /AUTOMATION
+    # 3. If dispatch fails, launch with /AUTOMATION
     ppt_exe = _find_powerpoint_exe()
     if ppt_exe and Path(ppt_exe).is_file():
         subprocess.Popen([ppt_exe, "/AUTOMATION"])
-        # Poll for registration in Running Object Table (up to 8 seconds)
         for _ in range(16):
             time.sleep(0.5)
             try:
-                return win32com.client.GetActiveObject("PowerPoint.Application")
+                app = win32com.client.GetActiveObject("PowerPoint.Application")
+                _ = app.Presentations
+                return app
             except Exception:
                 pass
 
-    # If still not found, retry Dispatch once more to get the exact COM error
     return win32com.client.Dispatch("PowerPoint.Application")
 
 
 def render_slide_preview(pptx_path: Path | str, slide_index: int, output_png_path: Path | str) -> Path:
     """
     Renders a native preview PNG image of a specific slide in a PPTX file using PowerPoint COM.
-    No fallback to PIL is performed - fails explicitly if PowerPoint COM cannot render.
+    Retries up to 3 times with backoff if a transient COM RPC collision occurs.
     """
     pptx_path = Path(pptx_path).resolve()
     output_png_path = Path(output_png_path).resolve()
@@ -158,34 +162,39 @@ def render_slide_preview(pptx_path: Path | str, slide_index: int, output_png_pat
     # Acquire lock so only one thread executes PowerPoint COM actions at a time
     with _com_lock:
         pythoncom.CoInitialize()
-        presentation = None
-        try:
-            ppt_app = _get_powerpoint_com_app()
-            # Open read-only, untitled=False, with_window=False
-            presentation = ppt_app.Presentations.Open(abs_pptx_path, True, False, False)
+        last_err = None
+        for attempt in range(1, 4):
+            presentation = None
+            try:
+                ppt_app = _get_powerpoint_com_app()
+                # Open read-only, untitled=False, with_window=False
+                presentation = ppt_app.Presentations.Open(abs_pptx_path, True, False, False)
 
-            # PowerPoint slide index is 1-based in COM
-            com_slide_idx = slide_index + 1
-            if not (1 <= com_slide_idx <= presentation.Slides.Count):
-                raise ValueError(
-                    f"Slide index {com_slide_idx} out of range (total slides: {presentation.Slides.Count})"
-                )
+                # PowerPoint slide index is 1-based in COM
+                com_slide_idx = slide_index + 1
+                if not (1 <= com_slide_idx <= presentation.Slides.Count):
+                    raise ValueError(
+                        f"Slide index {com_slide_idx} out of range (total slides: {presentation.Slides.Count})"
+                    )
 
-            slide = presentation.Slides(com_slide_idx)
-            slide.Export(abs_output_path, "PNG", 1280, 720)
+                slide = presentation.Slides(com_slide_idx)
+                slide.Export(abs_output_path, "PNG", 1280, 720)
 
-            if not output_png_path.exists() or output_png_path.stat().st_size == 0:
-                raise RuntimeError(f"PowerPoint COM export completed but no PNG was generated at {output_png_path}")
+                if not output_png_path.exists() or output_png_path.stat().st_size == 0:
+                    raise RuntimeError(f"PowerPoint COM export completed but no PNG was generated at {output_png_path}")
 
-            print(f"[PowerPoint COM] Successfully exported slide {com_slide_idx} -> {output_png_path.name} ({output_png_path.stat().st_size} bytes)")
-            return output_png_path
+                print(f"[PowerPoint COM] Successfully exported slide {com_slide_idx} -> {output_png_path.name} ({output_png_path.stat().st_size} bytes)")
+                pythoncom.CoUninitialize()
+                return output_png_path
 
-        except Exception as err:
-            raise RuntimeError(f"PowerPoint COM preview generation failed: {err}") from err
-        finally:
-            if presentation is not None:
-                try:
-                    presentation.Close()
-                except Exception:
-                    pass
-            pythoncom.CoUninitialize()
+            except Exception as err:
+                last_err = err
+                time.sleep(0.5 * attempt)
+            finally:
+                if presentation is not None:
+                    try:
+                        presentation.Close()
+                    except Exception:
+                        pass
+        pythoncom.CoUninitialize()
+        raise RuntimeError(f"PowerPoint COM preview generation failed after 3 attempts: {last_err}") from last_err

@@ -25,11 +25,10 @@ router = APIRouter(prefix="/api/scrape", tags=["Scraper"])
 class StartScrapeRequest(BaseModel):
     url: str = Field(..., description="Target website URL to scrape")
     max_pages: int = Field(default=25, ge=1, le=10000, description="Max sub-pages to crawl")
-    max_depth: int = Field(default=2, ge=0, le=10, description="Max crawl depth (0 = target page only)")
+    max_depth: int = Field(default=4, ge=0, le=4, description="Max crawl depth (0 = target page only)")
     enable_pagination: bool = Field(default=True, description="Enable automatic pagination detection and following")
     consecutive_gate_threshold: int = Field(default=3, ge=1, le=10, description="Skip pagination after N consecutive gated pages")
     consecutive_empty_threshold: int = Field(default=3, ge=1, le=10, description="Skip pagination after N consecutive empty pages (no files found)")
-    test_mode: bool = Field(default=False, description="Enable test mode with limited scope and detailed logging")
 
 
 class ScrapeTaskStatus(BaseModel):
@@ -76,7 +75,6 @@ def _run_scrape_pipeline(
     enable_pagination: bool,
     consecutive_gate_threshold: int,
     consecutive_empty_threshold: int,
-    test_mode: bool,
     stop_event: threading.Event,
 ):
     task = tasks[task_id]
@@ -128,13 +126,6 @@ def _run_scrape_pipeline(
             log("Authentication=false before crawling; no recognized authentication cookies were available.")
         task["current_step"] = "Crawling site & searching for download buttons..."
 
-        # Test mode: limit scope to specific URLs
-        if test_mode:
-            log("🧪 TEST MODE ENABLED: Limiting scope to base URL and page/2/")
-            max_pages = 10  # Limit pages for test
-            max_depth = 2   # Limit depth for test
-            # We'll handle pagination filtering in the crawler
-
         scraper = SiteScraper(
             target_url=target_url,
             max_crawl_pages=max_pages,
@@ -147,17 +138,14 @@ def _run_scrape_pipeline(
             consecutive_gate_threshold=consecutive_gate_threshold,
             consecutive_empty_threshold=consecutive_empty_threshold,
         )
-        
-        if test_mode:
-            scraper.enable_test_mode()
 
         discovered_ppts: list[DiscoveredPowerPoint] = []
         total_slides = 0
         uploaded_slides = 0
         saved_cards = []
         
-        # Thread pool for parallel processing of discovered files
-        process_executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+        # Thread pool for sequential processing of discovered PowerPoint files via COM
+        process_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         processing_futures = []
         
         def process_ppt_async(ppt: DiscoveredPowerPoint, ppt_index: int):
@@ -224,6 +212,10 @@ def _run_scrape_pipeline(
             on_found=on_found,
             should_stop=lambda: stop_event.is_set(),
         )
+
+        not_empty_count = sum(1 for s in scraper.page_status.values() if s == "not_empty")
+        empty_count = sum(1 for s in scraper.page_status.values() if s == "empty")
+        log(f"Crawl summary: {not_empty_count} not-empty pages, {empty_count} empty pages evaluated.")
 
         if stop_event.is_set():
             task["status"] = "cancelled"
@@ -349,7 +341,6 @@ def start_scrape_task(request: StartScrapeRequest):
             request.enable_pagination,
             request.consecutive_gate_threshold,
             request.consecutive_empty_threshold,
-            request.test_mode,
             stop_event,
         ),
         daemon=True,

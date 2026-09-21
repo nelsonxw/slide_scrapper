@@ -291,6 +291,148 @@ def test_pagination_link_tree_exploration():
     print("Pagination link tree exploration test passed!")
 
 
+def test_page_status_lifecycle():
+    """Test that page status state machine works (None -> not_empty / empty) with URL normalization."""
+    scraper = SiteScraper("https://example.com/templates/")
+    
+    # Unvisited URLs have None status
+    assert scraper.get_page_status("https://example.com/templates/") is None
+    assert scraper.get_page_status("https://example.com/templates/item-1") is None
+    
+    # Normalization handles hash and trailing slashes
+    scraper.set_page_status("https://example.com/templates/#overview", "not_empty")
+    assert scraper.get_page_status("https://example.com/templates") == "not_empty"
+    assert scraper.get_page_status("https://example.com/templates/") == "not_empty"
+    assert scraper.get_page_status("https://example.com/templates/#heading") == "not_empty"
+    
+    # Setting empty
+    scraper.set_page_status("https://example.com/templates/empty-item/", "empty")
+    assert scraper.get_page_status("https://example.com/templates/empty-item") == "empty"
+    
+    print("Page status lifecycle test passed!")
+
+
+def test_extract_page_number():
+    """Test extracting page numbers from various pagination URL patterns."""
+    scraper = SiteScraper("https://example.com")
+    
+    test_cases = [
+        ("https://slidemodel.com/free-powerpoint-templates/", 1),
+        ("https://slidemodel.com/free-powerpoint-templates/page/2/", 2),
+        ("https://slidemodel.com/free-powerpoint-templates/page/10/", 10),
+        ("https://example.com/items?page=3", 3),
+        ("https://example.com/items?p=4", 4),
+        ("https://example.com/items/page-5/", 5),
+        ("https://example.com/items/p6", 6),
+    ]
+    for url, expected in test_cases:
+        actual = scraper._extract_page_number(url)
+        assert actual == expected, f"Expected {expected} for {url}, got {actual}"
+    
+    print("Extract page number test passed!")
+
+
+def test_revamped_crawler_status_flow():
+    """Test end-to-end status determination and priority pagination flow."""
+    import unittest.mock as mock
+    import httpx
+    
+    scraper = SiteScraper(
+        "https://example.com/catalog/",
+        max_crawl_pages=10,
+        max_depth=2,
+        enable_pagination=True,
+        consecutive_empty_threshold=2,
+        use_browser=False,
+    )
+    
+    # Mock HTTP responses:
+    # Page 1 (catalog): has 1 template link and 1 pagination link to Page 2
+    # Template 1: has a download button to presentation.pptx
+    # presentation.pptx: binary PPTX
+    # Page 2: empty catalog, has pagination link to Page 3
+    # Page 3: empty catalog, has pagination link to Page 4
+    
+    html_page1 = """
+    <html><body>
+        <h1>Catalog Page 1</h1>
+        <a href="/catalog/page/2/">Page 2</a>
+        <a href="/catalog/template-1/">Template 1</a>
+    </body></html>
+    """
+    html_template1 = """
+    <html><body>
+        <h1>Template 1</h1>
+        <a href="/downloads/presentation.pptx" class="btn-download">Business Strategy Slide Deck</a>
+    </body></html>
+    """
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("[Content_Types].xml", "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/ppt/presentation.xml' ContentType='application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml'/></Types>")
+        zf.writestr("ppt/presentation.xml", "<p:presentation/>")
+    # Pad to at least 512 bytes
+    if len(buf.getvalue()) < 512:
+        with zipfile.ZipFile(buf, "a") as zf:
+            zf.writestr("ppt/padding.txt", "0" * 500)
+    dummy_pptx = buf.getvalue()
+    
+    html_page2 = """
+    <html><body>
+        <h1>Catalog Page 2</h1>
+        <a href="/catalog/page/3/">Page 3</a>
+    </body></html>
+    """
+    html_page3 = """
+    <html><body>
+        <h1>Catalog Page 3</h1>
+        <a href="/catalog/page/4/">Page 4</a>
+    </body></html>
+    """
+
+    def mock_get(url, *args, **kwargs):
+        req = httpx.Request("GET", url)
+        u = str(url).lower()
+        if "presentation.pptx" in u:
+            return httpx.Response(200, content=dummy_pptx, request=req)
+        elif "template-1" in u:
+            return httpx.Response(200, html=html_template1, headers={"content-type": "text/html"}, request=req)
+        elif "/page/2" in u:
+            return httpx.Response(200, html=html_page2, headers={"content-type": "text/html"}, request=req)
+        elif "/page/3" in u:
+            return httpx.Response(200, html=html_page3, headers={"content-type": "text/html"}, request=req)
+        elif "/page/4" in u:
+            # Should NEVER be called because consecutive empty threshold is 2!
+            raise AssertionError("Page 4 should not be crawled after 2 consecutive empty pages!")
+        else:
+            return httpx.Response(200, html=html_page1, headers={"content-type": "text/html"}, request=req)
+
+    with mock.patch("httpx.Client.get", side_effect=mock_get):
+        found_items = []
+        logs = []
+        scraper.crawl_and_extract(on_log=logs.append, on_found=found_items.append)
+        
+        # 1. Template 1 should be found and downloaded
+        assert len(found_items) == 1, f"Expected 1 presentation, found {len(found_items)}"
+        assert "Business Strategy" in found_items[0].title
+        
+        # 2. Page 1 status should be 'not_empty' because template-1 yielded a file
+        assert scraper.get_page_status("https://example.com/catalog/") == "not_empty"
+        
+        # 3. Template 1 status should be 'not_empty'
+        assert scraper.get_page_status("https://example.com/catalog/template-1/") == "not_empty"
+        
+        # 4. Page 2 and Page 3 should be 'empty'
+        assert scraper.get_page_status("https://example.com/catalog/page/2/") == "empty"
+        assert scraper.get_page_status("https://example.com/catalog/page/3/") == "empty"
+        
+        # 5. Page 4 should not be evaluated because consecutive empty threshold of 2 was reached
+        assert scraper.get_page_status("https://example.com/catalog/page/4/") is None
+    
+    print("Revamped crawler status flow test passed!")
+
+
 if __name__ == "__main__":
     test_pagination_detection()
     test_pagination_link_extraction()
@@ -303,4 +445,7 @@ if __name__ == "__main__":
     test_context_stack_management()
     test_file_discovery_propagation()
     test_pagination_link_tree_exploration()
+    test_page_status_lifecycle()
+    test_extract_page_number()
+    test_revamped_crawler_status_flow()
     print("All pagination tests passed successfully!")
