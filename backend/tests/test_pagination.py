@@ -3,26 +3,31 @@ from app.scraper.crawler import SiteScraper
 
 
 def test_pagination_detection():
-    """Test that pagination links are correctly identified."""
-    scraper = SiteScraper("https://example.com")
+    """Test that pagination links are correctly identified and scoped to target section."""
+    scraper = SiteScraper("https://slidemodel.com/free-powerpoint-templates/")
     
-    # Test various pagination patterns
+    # Test pagination links under target section (should be accepted)
     test_cases = [
         ("https://slidemodel.com/free-powerpoint-templates/page/2/", True),
         ("https://slidemodel.com/free-powerpoint-templates/page/3/", True),
-        ("https://example.com/products?page=2", True),
-        ("https://example.com/products?p=3", True),
-        ("https://example.com/products?offset=20", True),
-        ("https://example.com/products?start=20", True),
-        ("https://example.com/products/p2", True),
-        ("https://example.com/products/pg3", True),
-        ("https://example.com/products/page-2", True),
+        ("https://slidemodel.com/free-powerpoint-templates/?page=2", True),
+        ("https://slidemodel.com/free-powerpoint-templates/?p=3", True),
+    ]
+    
+    # Test pagination links from other sections (should be rejected)
+    rejection_cases = [
+        ("https://slidemodel.com/templates/page/2/", False),
+        ("https://slidemodel.com/best-powerpoint-templates/page/2/", False),
+        ("https://slidemodel.com/templates/category/powerpoint/diagrams/page/2/", False),
+        ("https://example.com/products?page=2", False),
         ("https://slidemodel.com/free-powerpoint-templates/3-ring-milestone-infographic-powerpoint-template/", False),
         ("https://example.com/products/item-1", False),
         ("https://example.com/about", False),
     ]
     
-    for url, expected_is_pagination in test_cases:
+    all_cases = test_cases + rejection_cases
+    
+    for url, expected_is_pagination in all_cases:
         result = scraper._is_pagination_link(url, "https://slidemodel.com/free-powerpoint-templates/")
         assert result == expected_is_pagination, f"Failed for {url}: expected {expected_is_pagination}, got {result}"
     

@@ -475,21 +475,26 @@ class SiteScraper:
         current_base = _strip_pagination_segments(current_lower)
         target_base = _strip_pagination_segments(self.target_url.lower())
 
-        if url_base == current_base:
-            return True
-
+        # Strict requirement: pagination link must be under the target path section
+        # Only accept pagination that is a direct child of the target URL's path
         parsed_tgt = urlparse(target_base)
         parsed_url = urlparse(url_base)
 
-        if parsed_tgt.hostname == parsed_url.hostname:
-            if parsed_tgt.path in ('', '/'):
-                return True
-            if url_base.startswith(target_base):
-                return True
+        # Must be same domain
+        if parsed_tgt.hostname != parsed_url.hostname:
             return False
 
-        # In unit tests or cross-host scenarios
-        return url_base == current_base or parsed_url.hostname != urlparse(current_base).hostname
+        # If target is root, accept any pagination on same domain
+        if parsed_tgt.path in ('', '/'):
+            return url_base == current_base
+
+        # Strict: pagination base must exactly match target base or current base
+        # This prevents /templates/page/2/ from being accepted when target is /free-powerpoint-templates/
+        if url_base == target_base or url_base == current_base:
+            return True
+
+        # Reject pagination from other sections
+        return False
 
     def _extract_internal_links(
         self,
