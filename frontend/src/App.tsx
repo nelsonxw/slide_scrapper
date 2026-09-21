@@ -171,6 +171,7 @@ export const App: React.FC = () => {
         {activeTab === 'gallery' && (
           <SlideGallery
             onNavigateToScraper={() => setActiveTab('scrape')}
+            onSlideCountChange={(count) => setSlideCount(count)}
           />
         )}
       </main>

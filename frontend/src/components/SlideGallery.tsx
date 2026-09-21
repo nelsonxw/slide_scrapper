@@ -6,9 +6,10 @@ import { IconSearch, IconTrash, IconRefresh, IconLayers, IconAlertTriangle } fro
 
 interface SlideGalleryProps {
   onNavigateToScraper?: () => void;
+  onSlideCountChange?: (count: number) => void;
 }
 
-export const SlideGallery: React.FC<SlideGalleryProps> = ({ onNavigateToScraper }) => {
+export const SlideGallery: React.FC<SlideGalleryProps> = ({ onNavigateToScraper, onSlideCountChange }) => {
   const [slides, setSlides] = useState<StoredSlideCard[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [searchTerm, setSearchTerm] = useState('');
@@ -17,12 +18,28 @@ export const SlideGallery: React.FC<SlideGalleryProps> = ({ onNavigateToScraper 
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [previewSlide, setPreviewSlide] = useState<StoredSlideCard | null>(null);
 
+  const fetchTotalCount = async () => {
+    try {
+      const allSlides = await api.getSlides();
+      if (onSlideCountChange) {
+        onSlideCountChange(allSlides.length);
+      }
+    } catch (err: any) {
+      // Silently fail - don't show error for count fetch
+      console.error('Failed to fetch total slide count:', err);
+    }
+  };
+
   const fetchSlides = async () => {
     setIsLoading(true);
     setErrorMsg(null);
     try {
       const data = await api.getSlides(searchTerm);
       setSlides(data);
+      // Only update the badge count if not filtering (to show total count)
+      if (onSlideCountChange && !searchTerm) {
+        onSlideCountChange(data.length);
+      }
       // Clean up selected IDs that no longer exist
       const existingIds = new Set(data.map((d) => d.id));
       setSelectedIds((prev) => new Set([...prev].filter((id) => existingIds.has(id))));
@@ -35,6 +52,7 @@ export const SlideGallery: React.FC<SlideGalleryProps> = ({ onNavigateToScraper 
 
   useEffect(() => {
     fetchSlides();
+    fetchTotalCount();
   }, []);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
@@ -72,11 +90,23 @@ export const SlideGallery: React.FC<SlideGalleryProps> = ({ onNavigateToScraper 
     setErrorMsg(null);
     try {
       const idsToDelete = Array.from(selectedIds);
-      await api.deleteSlides(idsToDelete);
+      // Optimistically update the slides state immediately
+      setSlides((prev) => {
+        const newSlides = prev.filter((slide) => !idsToDelete.includes(slide.id));
+        return newSlides;
+      });
       setSelectedIds(new Set());
+      
+      await api.deleteSlides(idsToDelete);
+      // Re-fetch to ensure state is in sync with server
       await fetchSlides();
+      // Fetch total count to update badge
+      await fetchTotalCount();
     } catch (err: any) {
       setErrorMsg(err.message || 'Failed to delete selected slides.');
+      // Re-fetch to restore correct state on error
+      await fetchSlides();
+      await fetchTotalCount();
     } finally {
       setIsDeleting(false);
     }
@@ -84,15 +114,27 @@ export const SlideGallery: React.FC<SlideGalleryProps> = ({ onNavigateToScraper 
 
   const handleDeleteSingle = async (slideId: string) => {
     try {
-      await api.deleteSlides([slideId]);
+      // Optimistically update the slides state immediately
+      setSlides((prev) => {
+        const newSlides = prev.filter((slide) => slide.id !== slideId);
+        return newSlides;
+      });
       setSelectedIds((prev) => {
         const next = new Set(prev);
         next.delete(slideId);
         return next;
       });
+      
+      await api.deleteSlides([slideId]);
+      // Re-fetch to ensure state is in sync with server
       await fetchSlides();
+      // Fetch total count to update badge
+      await fetchTotalCount();
     } catch (err: any) {
       setErrorMsg(err.message || 'Failed to delete slide.');
+      // Re-fetch to restore correct state on error
+      await fetchSlides();
+      await fetchTotalCount();
     }
   };
 

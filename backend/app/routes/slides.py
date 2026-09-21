@@ -105,6 +105,9 @@ def _download_firebase_object(
             raise HTTPException(status_code=404, detail="Storage object not found")
         content = blob.download_as_bytes()
         headers = {"Content-Disposition": f'attachment; filename="{filename}"'} if as_attachment else {}
+        # Add caching headers for better performance
+        headers["Cache-Control"] = "public, max-age=3600"  # Cache for 1 hour
+        headers["ETag"] = f'"{blob.etag}"' if blob.etag else ""
         return Response(content=content, media_type=media_type, headers=headers)
     except HTTPException:
         raise

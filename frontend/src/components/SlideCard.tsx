@@ -16,6 +16,7 @@ export const SlideCard: React.FC<SlideCardProps> = ({
   onOpenPreview,
 }) => {
   const [imgError, setImgError] = useState(false);
+  const [imgLoaded, setImgLoaded] = useState(false);
 
   // Ensure preview URL is properly formatted for the dev server proxy
   const getPreviewUrl = () => {
@@ -59,20 +60,39 @@ export const SlideCard: React.FC<SlideCardProps> = ({
         onClick={() => onOpenPreview(slide)}
       >
         {!imgError ? (
-          <img
-            src={getPreviewUrl()}
-            alt={slide.title}
-            onError={() => setImgError(true)}
-            style={{
-              position: 'absolute',
-              top: 0,
-              left: 0,
-              width: '100%',
-              height: '100%',
-              objectFit: 'cover',
-              transition: 'transform 0.2s ease',
-            }}
-          />
+          <>
+            {!imgLoaded && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  height: '100%',
+                  background: 'linear-gradient(90deg, var(--slate-100) 25%, var(--slate-200) 50%, var(--slate-100) 75%)',
+                  backgroundSize: '200% 100%',
+                  animation: 'skeleton-loading 1.5s ease-in-out infinite',
+                }}
+              />
+            )}
+            <img
+              src={getPreviewUrl()}
+              alt={slide.title}
+              loading="lazy"
+              onError={() => setImgError(true)}
+              onLoad={() => setImgLoaded(true)}
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                width: '100%',
+                height: '100%',
+                objectFit: 'cover',
+                transition: 'transform 0.2s ease',
+                opacity: imgLoaded ? 1 : 0,
+              }}
+            />
+          </>
         ) : (
           <div
             style={{

@@ -153,6 +153,10 @@ class SiteScraper:
         if any(marker in final_url for marker in auth_path_markers):
             return True
 
+        # Check for account/welcome redirects
+        if "/account/welcome" in final_url or "/account/signin" in final_url or "/account/login" in final_url:
+            return True
+
         soup = BeautifulSoup(response.text, "html.parser")
         if soup.select_one("input[type='password']"):
             return True
@@ -528,9 +532,11 @@ class SiteScraper:
             )):
                 continue
 
-            # 2. Skip account management, checkout, and admin pages
+            # 2. Skip login/account gate pages, checkout, and admin pages
+            if self.browser_driver.is_login_url(sub_url):
+                continue
             if any(k in parsed_sub.path.lower() for k in (
-                "/account", "/wp-admin", "/checkout", "/cart", "/billing", "/plans-upgrade"
+                "/wp-admin", "/checkout", "/cart", "/billing", "/plans-upgrade"
             )):
                 continue
 
@@ -627,6 +633,12 @@ class SiteScraper:
 
                 if len(self.visited_urls) >= self.max_crawl_pages:
                     log(f"Reached max crawl pages limit ({self.max_crawl_pages}).")
+                    return False
+
+                # Skip URLs that point to login/account pages
+                if self.browser_driver.is_login_url(page_url):
+                    log(f"Skipping login/account page: {page_url}")
+                    self.set_page_status(page_url, "empty")
                     return False
 
                 self.visited_urls.add(clean)
@@ -907,6 +919,12 @@ class SiteScraper:
                     log(f"Reached max crawl pages limit ({self.max_crawl_pages}).")
                     return False
 
+                # Skip URLs that point to login/account pages
+                if self.browser_driver.is_login_url(page_url):
+                    log(f"Skipping login/account page: {page_url}")
+                    self.set_page_status(page_url, "empty")
+                    return False
+
                 self.visited_urls.add(clean)
                 log(f"Crawling page ({len(self.visited_urls)}/{self.max_crawl_pages}, depth={current_depth}/{max_depth_limit}): {page_url}")
 
@@ -1110,6 +1128,11 @@ class SiteScraper:
         """
         Downloads a candidate URL and validates if the response is a PowerPoint presentation.
         """
+        # Skip login/account URLs before fetching
+        if self.browser_driver.is_login_url(url):
+            log(f"Skipping login/account URL: {url}")
+            return None
+
         try:
             resp = self._fetch_url(url, client=client)
             if not resp or resp.status_code != 200:
@@ -1184,6 +1207,10 @@ class SiteScraper:
                         if is_auth_gate:
                             log(f"Page appears gated in HTTP response; retrying through the live authenticated browser: {source_page_url}")
                         browser_target_url = url if interactive_download_form else source_page_url
+                        # Skip if browser target is a login page
+                        if self.browser_driver.is_login_url(browser_target_url):
+                            log(f"Skipping login page in browser download attempt: {browser_target_url}")
+                            return None
                         if browser_target_url in self._browser_processed_pages:
                             return None
                         self._browser_processed_pages.add(browser_target_url)

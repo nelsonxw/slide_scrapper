@@ -104,6 +104,30 @@ class BrowserDownloader:
     def has_authentication_cookies(cls, cookies: list[dict[str, object]]) -> bool:
         return any(cls.is_authentication_cookie(cookie) for cookie in cookies)
 
+    @classmethod
+    def is_login_url(cls, url: str) -> bool:
+        """Detects if a URL points to a login/signin/account gate page."""
+        if not url:
+            return False
+        url_lower = url.lower()
+        login_path_patterns = (
+            "/login",
+            "/signin",
+            "/sign-in",
+            "/signup",
+            "/sign-up",
+            "/register",
+            "/account/welcome",
+            "/account/signin",
+            "/account/login",
+            "/account/signup",
+            "/account/register",
+            "wp-login.php",
+            "action=login",
+            "action=signin",
+        )
+        return any(pattern in url_lower for pattern in login_path_patterns)
+
     def _read_persisted_cookies(self) -> list[dict[str, object]]:
         try:
             cookies = json.loads(self._session_cookie_file().read_text(encoding="utf-8"))
@@ -613,6 +637,15 @@ class BrowserDownloader:
             _log("[Browser Automation] No interactive download button found in the live session.")
             return None
 
+        # Check if download element points to a login page
+        try:
+            element_href = download_element.get_attribute("href")
+            if element_href and self.is_login_url(element_href):
+                _log(f"[Browser Automation] Download element points to login page: {element_href}. Skipping.")
+                return None
+        except Exception:
+            pass
+
         ppt_responses: list[Any] = []
 
         def capture_ppt_response(response):
@@ -638,6 +671,10 @@ class BrowserDownloader:
                         return suggested_name, content
             except Exception as click_error:
                 _log(f"[Browser Automation] Live download wait notice: {click_error}")
+                # Check if page redirected to login during click attempt
+                if self.is_login_url(page.url):
+                    _log(f"[Browser Automation] Page redirected to login page during download attempt: {page.url}. Skipping.")
+                    return None
                 for response in ppt_responses:
                     content = response.body()
                     is_ppt, fmt = is_powerpoint_content(content)
@@ -729,6 +766,11 @@ class BrowserDownloader:
                 page.wait_for_timeout(min(500, timeout_ms))
                 _log(f"[Browser Automation] Page loaded at {page.url}.")
 
+                # Check if page redirected to login during navigation
+                if self.is_login_url(page.url):
+                    _log(f"[Browser Automation] Page redirected to login page during navigation: {page.url}. Skipping.")
+                    return None
+
                 auth_gate_detected = self._page_requires_authentication(page)
                 authentication = self.has_authentication_cookies(cookies)
                 _log(
@@ -775,6 +817,15 @@ class BrowserDownloader:
                     _log(f"[Browser Automation] No interactive download button found on page.")
                     return None
 
+                # Check if download element points to a login page
+                try:
+                    element_href = download_element.get_attribute("href")
+                    if element_href and self.is_login_url(element_href):
+                        _log(f"[Browser Automation] Download element points to login page: {element_href}. Skipping.")
+                        return None
+                except Exception:
+                    pass
+
                 # 2. Trigger download and wait for download event or a PowerPoint response
                 ppt_responses: list[Any] = []
 
@@ -806,6 +857,10 @@ class BrowserDownloader:
                                 _log(f"[Browser Automation] Downloaded file is not a valid PowerPoint presentation ({len(content)} bytes).")
                     except Exception as click_err:
                         _log(f"[Browser Automation] Download wait event notice: {click_err}")
+                        # Check if page redirected to login during click attempt
+                        if self.is_login_url(page.url):
+                            _log(f"[Browser Automation] Page redirected to login page during download attempt: {page.url}. Skipping.")
+                            return None
                         for response in ppt_responses:
                             try:
                                 content = response.body()
